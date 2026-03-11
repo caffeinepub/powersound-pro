@@ -322,6 +322,56 @@ function makeGuardianCurve(): Float32Array<ArrayBuffer> {
   return curve;
 }
 
+function makeClassACurve(): Float32Array<ArrayBuffer> {
+  // Class A: warm soft saturation
+  const n = 256;
+  const curve = new Float32Array(n) as Float32Array<ArrayBuffer>;
+  for (let i = 0; i < n; i++) {
+    const x = (i * 2) / n - 1;
+    curve[i] = Math.tanh(x * 1.2) / Math.tanh(1.2);
+  }
+  return curve;
+}
+
+function makeClassBCurve(): Float32Array<ArrayBuffer> {
+  // Class B: mild push-pull character
+  const n = 256;
+  const curve = new Float32Array(n) as Float32Array<ArrayBuffer>;
+  for (let i = 0; i < n; i++) {
+    const x = (i * 2) / n - 1;
+    curve[i] = x > 0 ? x ** 0.95 : -((-x) ** 0.95);
+  }
+  return curve;
+}
+
+function makeClassCCurve(): Float32Array<ArrayBuffer> {
+  // Class C: gentle harmonic enhancer
+  const n = 256;
+  const curve = new Float32Array(n) as Float32Array<ArrayBuffer>;
+  for (let i = 0; i < n; i++) {
+    const x = (i * 2) / n - 1;
+    curve[i] = x + 0.015 * Math.sin(Math.PI * x * 2);
+  }
+  return curve;
+}
+
+function makeClassDCurve(): Float32Array<ArrayBuffer> {
+  // Class D: clarity/transient enhancer — light hard knee only at extremes
+  const n = 256;
+  const curve = new Float32Array(n) as Float32Array<ArrayBuffer>;
+  for (let i = 0; i < n; i++) {
+    const x = (i * 2) / n - 1;
+    const absX = Math.abs(x);
+    if (absX < 0.9) {
+      curve[i] = x;
+    } else {
+      const sign = x > 0 ? 1 : -1;
+      curve[i] = sign * (0.9 + (absX - 0.9) * 0.5);
+    }
+  }
+  return curve;
+}
+
 function SmartChipCard({
   label,
   healChip = false,
@@ -438,6 +488,7 @@ export default function App() {
     Number(localStorage.getItem("powersound_commander_memory") || "0"),
   );
   const [commanderLog, setCommanderLog] = useState<string[]>([]);
+  const [commanderOn, setCommanderOn] = useState(true);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -446,8 +497,8 @@ export default function App() {
   const loudGainRef = useRef<GainNode | null>(null);
   const compressorRef = useRef<DynamicsCompressorNode | null>(null);
   const eqNodesRef = useRef<BiquadFilterNode[]>([]);
-  const engineGainsRef = useRef<GainNode[]>([]);
   const engineFiltersRef = useRef<BiquadFilterNode[]>([]);
+  const defenseActiveRef = useRef(false);
   const bassRouteGainRef = useRef<GainNode | null>(null);
   const highsRouteGainRef = useRef<GainNode | null>(null);
   const bass80hzGainRef = useRef<GainNode | null>(null);
@@ -466,6 +517,14 @@ export default function App() {
   const titaniumCompressorRef = useRef<DynamicsCompressorNode | null>(null);
   const lookaheadDelayRef = useRef<DelayNode | null>(null);
   const smartChipGainsRef = useRef<GainNode[]>([]);
+  const classARef = useRef<WaveShaperNode | null>(null);
+  const classBRef = useRef<WaveShaperNode | null>(null);
+  const classCRef = useRef<WaveShaperNode | null>(null);
+  const classDRef = useRef<WaveShaperNode | null>(null);
+  const autoFreqAnalyserRef = useRef<AnalyserNode | null>(null);
+  const autoFreqProfileRef = useRef<string>("BALANCED");
+  const [autoFreqProfile, setAutoFreqProfile] = useState("BALANCED");
+  const [autoFreqBars, setAutoFreqBars] = useState<number[]>(Array(8).fill(0));
 
   const logCommanderAction = useCallback((action: string) => {
     const count =
@@ -502,31 +561,29 @@ export default function App() {
     });
     eqNodesRef.current = filters;
 
-    // Engine 1: Deep Bass (lowshelf 80Hz) + 5 smart chips
+    // Engine 1: Low-pass signal filter (no gain) — pure signal routing
     const eng1Filter = ctx.createBiquadFilter();
-    eng1Filter.type = "lowshelf";
-    eng1Filter.frequency.value = 80;
-    eng1Filter.gain.value = 6;
+    eng1Filter.type = "lowpass";
+    eng1Filter.frequency.value = 200;
+    eng1Filter.Q.value = Math.SQRT1_2;
 
-    // Engine 2: Mid Bass (peaking 250Hz) + 5 smart chips
+    // Engine 2: Band-pass signal filter (no gain) — pure signal routing
     const eng2Filter = ctx.createBiquadFilter();
-    eng2Filter.type = "peaking";
-    eng2Filter.frequency.value = 250;
-    eng2Filter.Q.value = 1.2;
-    eng2Filter.gain.value = 4;
+    eng2Filter.type = "bandpass";
+    eng2Filter.frequency.value = 500;
+    eng2Filter.Q.value = 1.0;
 
-    // Engine 3: Midrange presence (peaking 2kHz) + 5 smart chips
+    // Engine 3: Band-pass signal filter (no gain) — pure signal routing
     const eng3Filter = ctx.createBiquadFilter();
-    eng3Filter.type = "peaking";
-    eng3Filter.frequency.value = 2000;
+    eng3Filter.type = "bandpass";
+    eng3Filter.frequency.value = 3000;
     eng3Filter.Q.value = 1.0;
-    eng3Filter.gain.value = 3;
 
-    // Engine 4: Air/Highs (highshelf 8kHz) + 5 smart chips
+    // Engine 4: High-pass signal filter (no gain) — pure signal routing
     const eng4Filter = ctx.createBiquadFilter();
-    eng4Filter.type = "highshelf";
-    eng4Filter.frequency.value = 8000;
-    eng4Filter.gain.value = 4;
+    eng4Filter.type = "highpass";
+    eng4Filter.frequency.value = 6000;
+    eng4Filter.Q.value = Math.SQRT1_2;
 
     // 20 Smart Chip GainNodes (5 per engine)
     const chipGains: GainNode[] = Array.from({ length: 20 }, () => {
@@ -536,29 +593,44 @@ export default function App() {
     });
     smartChipGainsRef.current = chipGains;
 
-    // Engine gain nodes (output of each engine)
-    const eng1Gain = ctx.createGain();
-    eng1Gain.gain.value = 1.0;
-    const eng2Gain = ctx.createGain();
-    eng2Gain.gain.value = 1.0;
-    const eng3Gain = ctx.createGain();
-    eng3Gain.gain.value = 1.0;
-    const eng4Gain = ctx.createGain();
-    eng4Gain.gain.value = 1.0;
-    engineGainsRef.current = [eng1Gain, eng2Gain, eng3Gain, eng4Gain];
-
     const engineSum = ctx.createGain();
-    engineSum.gain.value = 0.25;
+    engineSum.gain.value = 0.2; // 4 engines summed → normalize
 
     // Processor gain + FPGA wave shaper
     const processorGain = ctx.createGain();
-    processorGain.gain.value = processorOn ? 1.2 : 1.0;
+    processorGain.gain.value = 1.0;
     processorGainRef.current = processorGain;
 
     const fpgaWaveShaper = ctx.createWaveShaper();
     fpgaWaveShaper.curve = processorOn ? makeSoftSatCurve(50) : null;
     fpgaWaveShaper.oversample = "4x";
     fpgaWaveShaperRef.current = fpgaWaveShaper;
+
+    // A+B+C+D class waveshapers — subtle character, never distort
+    const classA = ctx.createWaveShaper();
+    classA.curve = makeClassACurve();
+    classA.oversample = "2x";
+    classARef.current = classA;
+
+    const classB = ctx.createWaveShaper();
+    classB.curve = makeClassBCurve();
+    classB.oversample = "2x";
+    classBRef.current = classB;
+
+    const classC = ctx.createWaveShaper();
+    classC.curve = makeClassCCurve();
+    classC.oversample = "2x";
+    classCRef.current = classC;
+
+    const classD = ctx.createWaveShaper();
+    classD.curve = makeClassDCurve();
+    classD.oversample = "2x";
+    classDRef.current = classD;
+
+    // Auto frequency analyser (separate from distortion analyser)
+    const autoFreqAnalyser = ctx.createAnalyser();
+    autoFreqAnalyser.fftSize = 2048;
+    autoFreqAnalyserRef.current = autoFreqAnalyser;
 
     // Bass path — 80Hz lowpass
     const bassLowpass = ctx.createBiquadFilter();
@@ -571,9 +643,10 @@ export default function App() {
     bass80hzGainRef.current = bass80hzGain;
 
     const generatorBassFilter = ctx.createBiquadFilter();
-    generatorBassFilter.type = "lowshelf";
+    generatorBassFilter.type = "peaking";
     generatorBassFilter.frequency.value = 80;
-    generatorBassFilter.gain.value = generatorBassActive ? 3 : 0;
+    generatorBassFilter.Q.value = 1.2;
+    generatorBassFilter.gain.value = generatorBassActive ? 2 : 0;
     generatorBassFilterRef.current = generatorBassFilter;
 
     const bassRouteGain = ctx.createGain();
@@ -597,7 +670,7 @@ export default function App() {
     highsRouteGainRef.current = highsRouteGain;
 
     const masterMix = ctx.createGain();
-    masterMix.gain.value = 0.5;
+    masterMix.gain.value = 1.0;
 
     // Healing chip filters — 10 peaking filters across spectrum
     const healFreqs = [60, 120, 250, 500, 1000, 2000, 4000, 6000, 10000, 16000];
@@ -678,32 +751,35 @@ export default function App() {
       filters[i].connect(filters[i + 1]);
     const lastEq = filters[filters.length - 1];
 
-    // EQ → Engine filters → smart chip gains (5 per engine) → engine gain → engineSum
+    // EQ → Engine filters → engineSum (no gain nodes on engine path)
     const engFilters = [eng1Filter, eng2Filter, eng3Filter, eng4Filter];
     engineFiltersRef.current = engFilters;
-    const engGains = [eng1Gain, eng2Gain, eng3Gain, eng4Gain];
-    engFilters.forEach((ef, ei) => {
+    for (const ef of engFilters) {
       lastEq.connect(ef);
-      // Chain 5 chip gains per engine in series
-      const baseChip = ei * 5;
-      ef.connect(chipGains[baseChip]);
-      for (let c = 0; c < 4; c++)
-        chipGains[baseChip + c].connect(chipGains[baseChip + c + 1]);
-      chipGains[baseChip + 4].connect(engGains[ei]);
-      engGains[ei].connect(engineSum);
-    });
+      ef.connect(engineSum);
+    }
+    // Smart chips connect in parallel to engineSum for spectral control
+    lastEq.connect(chipGains[0]);
+    for (let c = 0; c < 19; c++) chipGains[c].connect(chipGains[c + 1]);
+    chipGains[19].connect(engineSum);
 
-    // engineSum → processorGain → fpgaWaveShaper → bass/highs paths
+    // engineSum → processorGain → fpgaWaveShaper → A/B/C/D classes → bass/highs paths
     engineSum.connect(processorGain);
     processorGain.connect(fpgaWaveShaper);
+    fpgaWaveShaper.connect(classA);
+    classA.connect(classB);
+    classB.connect(classC);
+    classC.connect(classD);
+    // Also wire autoFreqAnalyser on the pre-output signal
+    classD.connect(autoFreqAnalyser);
 
-    fpgaWaveShaper.connect(bassLowpass);
+    classD.connect(bassLowpass);
     bassLowpass.connect(bass80hzGain);
     bass80hzGain.connect(generatorBassFilter);
     generatorBassFilter.connect(bassRouteGain);
     bassRouteGain.connect(masterMix);
 
-    fpgaWaveShaper.connect(highsHighpass);
+    classD.connect(highsHighpass);
     highsHighpass.connect(generatorHighsFilter);
     generatorHighsFilter.connect(highsRouteGain);
     highsRouteGain.connect(masterMix);
@@ -772,19 +848,18 @@ export default function App() {
   }, [volumeBooster]);
 
   useEffect(() => {
-    if (loudGainRef.current)
-      loudGainRef.current.gain.value = loudMode && chainLinked ? 1.5 : 1.0;
-  }, [loudMode, chainLinked]);
+    if (loudGainRef.current) loudGainRef.current.gain.value = 1.0; // No gain on loud booster - signal shaping only
+    // biome-ignore lint/correctness/useExhaustiveDependencies: gain is constant
+  }, []);
 
   useEffect(() => {
-    engineActive.forEach((active, i) => {
-      // Engine gain node: 1 when ON, 0 when OFF (not a volume control)
-      if (engineGainsRef.current[i])
-        engineGainsRef.current[i].gain.value = active ? 1.0 : 0;
-      // Engine filter: slider controls filter frequency gain in dB (0–100 maps to -12 to +18 dB)
+    engineActive.forEach((_active, i) => {
       if (engineFiltersRef.current[i]) {
-        const dbGain = active ? (engineLevels[i] / 100) * 12 - 6 : 0; // -12 to +18 dB
-        engineFiltersRef.current[i].gain.value = dbGain;
+        // Slider adjusts filter frequency only — no gain changes ever
+        const baseFreqs = [200, 500, 3000, 6000];
+        const range = [150, 400, 2500, 5000];
+        const newFreq = baseFreqs[i] + ((engineLevels[i] - 50) / 50) * range[i];
+        engineFiltersRef.current[i].frequency.value = Math.max(20, newFreq);
       }
     });
   }, [engineActive, engineLevels]);
@@ -803,8 +878,8 @@ export default function App() {
       bassRouteGainRef.current.gain.value = 0.0;
       highsRouteGainRef.current.gain.value = 1.0;
     } else {
-      bassRouteGainRef.current.gain.value = 1.0;
-      highsRouteGainRef.current.gain.value = 1.0;
+      bassRouteGainRef.current.gain.value = 0.5;
+      highsRouteGainRef.current.gain.value = 0.5;
     }
   }, [bassHighsMode]);
 
@@ -830,8 +905,7 @@ export default function App() {
 
   // Processor gain + FPGA wave shaper
   useEffect(() => {
-    if (processorGainRef.current)
-      processorGainRef.current.gain.value = processorOn ? 1.2 : 1.0;
+    if (processorGainRef.current) processorGainRef.current.gain.value = 1.0;
     if (fpgaWaveShaperRef.current)
       fpgaWaveShaperRef.current.curve = processorOn
         ? makeSoftSatCurve(50)
@@ -842,7 +916,7 @@ export default function App() {
   // Generator bass filter
   useEffect(() => {
     if (generatorBassFilterRef.current)
-      generatorBassFilterRef.current.gain.value = generatorBassActive ? 3 : 0;
+      generatorBassFilterRef.current.gain.value = generatorBassActive ? 2 : 0;
     logCommanderAction(generatorBassActive ? "BASS GEN ON" : "BASS GEN OFF");
   }, [generatorBassActive, logCommanderAction]);
 
@@ -868,18 +942,22 @@ export default function App() {
     logCommanderAction(freezingActive ? "FREEZE ON" : "FREEZE OFF");
   }, [freezingActive, logCommanderAction]);
 
-  // Commander auto-response: when distortion detected, log it and tighten titanium stage
+  // Commander auto-response: only log when defense state CHANGES (not every frame)
   useEffect(() => {
     const titanium = titaniumCompressorRef.current;
     if (!titanium) return;
-    if (distortionLevel > 30) {
-      // Commander tells titanium to tighten
+    const isActive = distortionLevel > 30;
+    if (isActive) {
       titanium.threshold.value = -2;
       titanium.ratio.value = 3.0;
-      logCommanderAction(`DEFENSE ACTIVE ${distortionLevel}%`);
     } else {
       titanium.threshold.value = -3;
       titanium.ratio.value = 2.5;
+    }
+    if (isActive !== defenseActiveRef.current) {
+      defenseActiveRef.current = isActive;
+      if (isActive) logCommanderAction(`DEFENSE ACTIVE ${distortionLevel}%`);
+      else logCommanderAction("DEFENSE CLEAR");
     }
   }, [distortionLevel, logCommanderAction]);
 
@@ -898,6 +976,92 @@ export default function App() {
     if (generatorHighsFilterRef.current)
       generatorHighsFilterRef.current.frequency.value = jazzMode ? 12000 : 8000;
   }, [jazzMode]);
+
+  // ── Auto Frequency Generator — analyzes song, auto-adjusts filters ──────
+  useEffect(() => {
+    if (!playing) return;
+    const analyser = autoFreqAnalyserRef.current;
+    if (!analyser) return;
+    const bufLen = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufLen);
+    const sampleRate = autoFreqAnalyserRef.current ? 44100 : 44100;
+
+    const analyze = () => {
+      analyser.getByteFrequencyData(dataArray);
+      // Frequency bins map: each bin = sampleRate / fftSize Hz
+      // fftSize=2048, so binHz ≈ 21.5Hz at 44100
+      const binHz = sampleRate / 2048;
+      const lowEnd = Math.floor(200 / binHz); // 0-200Hz
+      const midStart = Math.floor(200 / binHz);
+      const midEnd = Math.floor(2000 / binHz);
+      const highStart = Math.floor(2000 / binHz);
+      const highEnd = Math.min(bufLen - 1, Math.floor(16000 / binHz));
+
+      let lowSum = 0;
+      let midSum = 0;
+      let highSum = 0;
+      for (let i = 0; i < lowEnd; i++) lowSum += dataArray[i];
+      for (let i = midStart; i < midEnd; i++) midSum += dataArray[i];
+      for (let i = highStart; i < highEnd; i++) highSum += dataArray[i];
+
+      const lowAvg = lowEnd > 0 ? lowSum / lowEnd : 0;
+      const midAvg = midEnd - midStart > 0 ? midSum / (midEnd - midStart) : 0;
+      const highAvg =
+        highEnd - highStart > 0 ? highSum / (highEnd - highStart) : 0;
+      const total = lowAvg + midAvg + highAvg || 1;
+
+      // 8-bar spectrum visualization
+      const barBins = Math.floor(bufLen / 8);
+      const bars = Array.from({ length: 8 }, (_, b) => {
+        let s = 0;
+        for (let i = b * barBins; i < (b + 1) * barBins && i < bufLen; i++)
+          s += dataArray[i];
+        return Math.round((s / barBins / 255) * 100);
+      });
+      setAutoFreqBars(bars);
+
+      const lowPct = lowAvg / total;
+      const midPct = midAvg / total;
+      const highPct = highAvg / total;
+
+      let profile = "BALANCED";
+      if (lowPct > 0.45) profile = "BASS HEAVY";
+      else if (highPct > 0.45) profile = "BRIGHT/AIRY";
+      else if (midPct > 0.45) profile = "MIDRANGE FOCUSED";
+
+      if (profile !== autoFreqProfileRef.current) {
+        autoFreqProfileRef.current = profile;
+        setAutoFreqProfile(profile);
+        // Auto-adjust engine filters smoothly
+        const engFilters = engineFiltersRef.current;
+        const eqNodes = eqNodesRef.current;
+        const now =
+          (autoFreqAnalyserRef.current as any)?._ctx?.currentTime ?? 0;
+        if (engFilters.length >= 4 && profile === "BASS HEAVY") {
+          engFilters[0].frequency.setTargetAtTime(80, now, 0.1);
+          if (eqNodes[0]) eqNodes[0].gain.setTargetAtTime(2, now, 0.1);
+          if (eqNodes[1]) eqNodes[1].gain.setTargetAtTime(1.5, now, 0.1);
+        } else if (engFilters.length >= 4 && profile === "MIDRANGE FOCUSED") {
+          engFilters[1].frequency.setTargetAtTime(400, now, 0.1);
+          engFilters[2].frequency.setTargetAtTime(1500, now, 0.1);
+        } else if (engFilters.length >= 4 && profile === "BRIGHT/AIRY") {
+          engFilters[3].frequency.setTargetAtTime(8000, now, 0.1);
+          if (eqNodes[7]) eqNodes[7].gain.setTargetAtTime(1.5, now, 0.1);
+          if (eqNodes[8]) eqNodes[8].gain.setTargetAtTime(1.5, now, 0.1);
+          if (eqNodes[9]) eqNodes[9].gain.setTargetAtTime(1.0, now, 0.1);
+        } else if (engFilters.length >= 4) {
+          // Restore defaults
+          const defaultFreqs = [200, 500, 3000, 6000];
+          engFilters.forEach((f, i) =>
+            f.frequency.setTargetAtTime(defaultFreqs[i], now, 0.1),
+          );
+        }
+      }
+    };
+
+    const interval = setInterval(analyze, 500);
+    return () => clearInterval(interval);
+  }, [playing]);
 
   // ── Battery drain/charge ─────────────────────────────────────────────────
   useEffect(() => {
@@ -1070,6 +1234,19 @@ export default function App() {
           fontFamily: "var(--font-mono)",
         }}
       >
+        {/* Commander master control overlay */}
+        {!commanderOn && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "oklch(0.04 0.01 242 / 0.7)",
+              zIndex: 40,
+              pointerEvents: "none",
+              backdropFilter: "brightness(0.4) saturate(0.3)",
+            }}
+          />
+        )}
         {/* AWARD BANNER */}
         <motion.div
           initial={{ opacity: 0, y: -20 }}
@@ -1605,35 +1782,50 @@ export default function App() {
                 transition={{ delay: 0.285 }}
                 className="rounded p-3"
                 style={{
-                  background:
-                    distortionLevel > 20
-                      ? "oklch(0.10 0.04 25)"
-                      : "oklch(0.10 0.014 242)",
-                  border:
-                    distortionLevel > 20
-                      ? "1px solid oklch(0.55 0.22 25)"
-                      : "1px solid oklch(0.35 0.14 148)",
-                  boxShadow:
-                    distortionLevel > 20
-                      ? "0 0 18px oklch(0.72 0.28 25 / 0.35)"
-                      : "0 0 10px oklch(0.55 0.20 148 / 0.1)",
+                  background: commanderOn
+                    ? distortionLevel > 20
+                      ? "oklch(0.10 0.04 148)"
+                      : "oklch(0.10 0.02 148)"
+                    : "oklch(0.10 0.014 242)",
+                  border: commanderOn
+                    ? `1px solid ${distortionLevel > 20 ? "oklch(0.65 0.26 148)" : "oklch(0.45 0.18 148)"}`
+                    : "1px solid oklch(0.35 0.14 148)",
+                  boxShadow: commanderOn
+                    ? distortionLevel > 20
+                      ? "0 0 22px oklch(0.72 0.28 148 / 0.5)"
+                      : "0 0 14px oklch(0.55 0.20 148 / 0.25)"
+                    : "0 0 10px oklch(0.55 0.20 148 / 0.1)",
                   transition: "all 0.3s ease",
                 }}
               >
                 <div className="flex items-center justify-between mb-2">
                   <SectionLabel>⚔ ANTI-DISTORTION DEFENSE TEAM</SectionLabel>
-                  {distortionLevel > 20 && (
-                    <span
-                      className="font-mono text-[8px] font-bold px-2 py-0.5 rounded"
-                      style={{
-                        background: "oklch(0.55 0.22 25)",
-                        color: "oklch(0.98 0.01 0)",
-                        animation: "pulse 1s infinite",
-                      }}
-                    >
-                      DEFENSE ACTIVE
-                    </span>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {distortionLevel > 20 && (
+                      <span
+                        className="font-mono text-[8px] font-bold px-2 py-0.5 rounded"
+                        style={{
+                          background: "oklch(0.55 0.22 148)",
+                          color: "oklch(0.98 0.01 0)",
+                          animation: "pulse 1s infinite",
+                        }}
+                      >
+                        DEFENSE ACTIVE
+                      </span>
+                    )}
+                    {commanderOn && (
+                      <span
+                        className="font-mono text-[7px] font-bold px-1.5 py-0.5 rounded"
+                        style={{
+                          background: "oklch(0.12 0.06 148)",
+                          color: "oklch(0.75 0.24 148)",
+                          border: "1px solid oklch(0.45 0.18 148)",
+                        }}
+                      >
+                        ⚡ CMD
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div className="flex flex-col gap-1.5">
                   {[
@@ -1703,7 +1895,7 @@ export default function App() {
                   style={{
                     color:
                       distortionLevel > 20
-                        ? "oklch(0.78 0.26 25)"
+                        ? "oklch(0.78 0.26 148)"
                         : "oklch(0.55 0.16 148)",
                   }}
                 >
@@ -1721,10 +1913,10 @@ export default function App() {
                 className="rounded p-3"
                 style={{
                   background: "oklch(0.10 0.014 242)",
-                  border: `1px solid ${distortionLevel > 20 ? "oklch(0.60 0.22 25)" : "oklch(0.30 0.08 212)"}`,
+                  border: `1px solid ${distortionLevel > 20 ? "oklch(0.60 0.22 148)" : "oklch(0.30 0.08 212)"}`,
                   boxShadow:
                     distortionLevel > 20
-                      ? "0 0 14px oklch(0.65 0.25 25 / 0.3)"
+                      ? "0 0 14px oklch(0.65 0.25 148 / 0.3)"
                       : "none",
                 }}
               >
@@ -1736,7 +1928,7 @@ export default function App() {
                       style={{
                         color:
                           distortionLevel > 20
-                            ? "oklch(0.72 0.28 25)"
+                            ? "oklch(0.72 0.28 148)"
                             : "oklch(0.55 0.16 212)",
                       }}
                     />
@@ -1745,7 +1937,7 @@ export default function App() {
                       style={{
                         color:
                           distortionLevel > 20
-                            ? "oklch(0.78 0.26 25)"
+                            ? "oklch(0.78 0.26 148)"
                             : "oklch(0.74 0.26 148)",
                       }}
                     >
@@ -1759,7 +1951,7 @@ export default function App() {
                     style={{
                       color:
                         distortionLevel > 20
-                          ? "oklch(0.72 0.24 25)"
+                          ? "oklch(0.72 0.24 148)"
                           : "oklch(0.55 0.14 212)",
                     }}
                   >
@@ -1778,7 +1970,7 @@ export default function App() {
                       width: `${Math.min(100, distortionLevel)}%`,
                       background:
                         distortionLevel > 50
-                          ? "oklch(0.65 0.25 25)"
+                          ? "oklch(0.65 0.25 148)"
                           : distortionLevel > 20
                             ? "oklch(0.72 0.26 75)"
                             : "oklch(0.74 0.26 148)",
@@ -1801,93 +1993,217 @@ export default function App() {
                 </div>
               </motion.div>
 
-              {/* SOUND ENGINES */}
-              <SectionLabel>◈ SOUND ENGINES · 4-CORE</SectionLabel>
-              {engineLevels.map((level, i) => (
-                <motion.div
-                  key={engineNames[i]}
-                  initial={{ opacity: 0, x: -20 }}
-                  animate={
-                    bookOpen ? { opacity: 1, x: 0 } : { opacity: 0, x: -20 }
-                  }
-                  transition={{ delay: 0.35 + i * 0.07 }}
-                  className="rounded p-3"
-                  style={{
-                    background: engineActive[i]
-                      ? "oklch(0.10 0.014 242)"
-                      : "oklch(0.08 0.008 242)",
-                    border: `1px solid ${engineActive[i] ? engineColors[i] : "oklch(0.20 0.04 242)"}`,
-                    opacity: engineActive[i] ? 1 : 0.6,
-                  }}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <div
-                        className="w-2.5 h-2.5 rounded-full"
-                        style={{
-                          background: engineActive[i]
-                            ? engineColors[i]
-                            : "oklch(0.25 0.04 242)",
-                          boxShadow: engineActive[i]
-                            ? `0 0 8px ${engineColors[i]}`
-                            : "none",
-                        }}
-                      />
-                      <span
-                        className="font-mono text-[10px] tracking-[0.3em]"
-                        style={{ color: engineColors[i] }}
-                      >
-                        ENGINE {i + 1} · {engineNames[i]}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      data-ocid={`engine.toggle.${i + 1}`}
-                      onClick={() =>
-                        setEngineActive((prev) =>
-                          prev.map((v, j) => (j === i ? !v : v)),
-                        )
+              {/* SOUND ENGINES — STATUS PANELS (signal processors, no gain) */}
+              <SectionLabel>◈ SOUND ENGINES · A+B+C+D CLASS</SectionLabel>
+              <div className="grid grid-cols-2 gap-2">
+                {engineNames.map((name, i) => {
+                  const filterTypes = [
+                    "LOWPASS",
+                    "BANDPASS",
+                    "BANDPASS",
+                    "HIGHPASS",
+                  ];
+                  const freqLabels = ["80Hz", "250Hz", "2kHz", "8kHz"];
+                  const classLabels = [
+                    "CLASS A",
+                    "CLASS B",
+                    "CLASS C",
+                    "CLASS D",
+                  ];
+                  return (
+                    <motion.div
+                      key={name}
+                      data-ocid={`engine.panel.${i + 1}`}
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={
+                        bookOpen
+                          ? { opacity: 1, scale: 1 }
+                          : { opacity: 0, scale: 0.95 }
                       }
-                      className="font-mono text-[9px] px-2 py-0.5 rounded transition-all"
+                      transition={{ delay: 0.35 + i * 0.07 }}
+                      className="rounded p-2.5"
                       style={{
                         background: engineActive[i]
-                          ? "oklch(0.13 0.06 212)"
-                          : "oklch(0.09 0.01 242)",
-                        border: `1px solid ${engineActive[i] ? "oklch(0.40 0.16 212)" : "oklch(0.20 0.04 242)"}`,
-                        color: engineActive[i]
-                          ? "oklch(0.72 0.28 212)"
-                          : "oklch(0.35 0.04 242)",
+                          ? "oklch(0.10 0.018 242)"
+                          : "oklch(0.07 0.008 242)",
+                        border: `1px solid ${engineActive[i] ? engineColors[i] : "oklch(0.18 0.04 242)"}`,
+                        boxShadow: engineActive[i]
+                          ? `0 0 12px ${engineColors[i]}22`
+                          : "none",
                       }}
                     >
-                      {engineActive[i] ? "ON" : "OFF"}
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="range"
-                      data-ocid={`engine.input.${i + 1}`}
-                      min={0}
-                      max={100}
-                      value={level}
-                      onChange={(e) =>
-                        setEngineLevels((prev) =>
-                          prev.map((v, j) =>
-                            j === i ? Number(e.target.value) : v,
-                          ),
-                        )
-                      }
-                      className="h-range flex-1"
-                      style={{ accentColor: engineColors[i] }}
-                    />
-                    <span
-                      className="font-mono text-[11px] w-8 text-right"
-                      style={{ color: engineColors[i] }}
-                    >
-                      {level}
-                    </span>
-                  </div>
-                </motion.div>
-              ))}
+                      {/* Status row */}
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <div
+                            className="w-2 h-2 rounded-full"
+                            style={{
+                              background: engineActive[i]
+                                ? engineColors[i]
+                                : "oklch(0.22 0.04 242)",
+                              boxShadow: engineActive[i]
+                                ? `0 0 6px ${engineColors[i]}`
+                                : "none",
+                              animation:
+                                engineActive[i] && playing
+                                  ? "pulse 1.5s infinite"
+                                  : "none",
+                            }}
+                          />
+                          <span
+                            className="font-mono text-[8px] tracking-[0.2em]"
+                            style={{ color: engineColors[i] }}
+                          >
+                            ENG {i + 1}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          data-ocid={`engine.toggle.${i + 1}`}
+                          onClick={() =>
+                            setEngineActive((prev) =>
+                              prev.map((v, j) => (j === i ? !v : v)),
+                            )
+                          }
+                          className="font-mono text-[7px] px-1.5 py-0.5 rounded transition-all"
+                          style={{
+                            background: engineActive[i]
+                              ? `oklch(0.12 0.05 ${[196, 212, 148, 75][i]})`
+                              : "oklch(0.08 0.01 242)",
+                            border: `1px solid ${engineActive[i] ? engineColors[i] : "oklch(0.18 0.04 242)"}`,
+                            color: engineActive[i]
+                              ? engineColors[i]
+                              : "oklch(0.32 0.04 242)",
+                          }}
+                        >
+                          {engineActive[i] ? "ON" : "OFF"}
+                        </button>
+                      </div>
+                      {/* Engine info */}
+                      <div className="space-y-0.5 mb-1.5">
+                        <div
+                          className="font-mono text-[9px] font-bold tracking-wider"
+                          style={{ color: engineColors[i] }}
+                        >
+                          {name}
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span
+                            className="font-mono text-[7px]"
+                            style={{ color: "oklch(0.42 0.08 242)" }}
+                          >
+                            {filterTypes[i]} · {freqLabels[i]}
+                          </span>
+                          <span
+                            className="font-mono text-[7px]"
+                            style={{ color: "oklch(0.55 0.14 212)" }}
+                          >
+                            {classLabels[i]}
+                          </span>
+                        </div>
+                        <div
+                          className="font-mono text-[7px]"
+                          style={{ color: "oklch(0.35 0.05 242)" }}
+                        >
+                          {engineActive[i]
+                            ? "SIGNAL ACTIVE · NO GAIN"
+                            : "BYPASSED"}
+                        </div>
+                        <div className="mt-1.5 flex items-center gap-0.5">
+                          <div
+                            style={{
+                              flex: 1,
+                              height: "4px",
+                              borderRadius: "2px",
+                              background: engineActive[i]
+                                ? "oklch(0.35 0.18 148 / 0.40)"
+                                : "oklch(0.18 0.02 242)",
+                              transition: "background 0.3s",
+                            }}
+                          />
+                          <div
+                            style={{
+                              flex: 1,
+                              height: "4px",
+                              borderRadius: "2px",
+                              background: engineActive[i]
+                                ? "oklch(0.40 0.18 148 / 0.47)"
+                                : "oklch(0.18 0.02 242)",
+                              transition: "background 0.3s",
+                            }}
+                          />
+                          <div
+                            style={{
+                              flex: 1,
+                              height: "4px",
+                              borderRadius: "2px",
+                              background: engineActive[i]
+                                ? "oklch(0.45 0.18 148 / 0.54)"
+                                : "oklch(0.18 0.02 242)",
+                              transition: "background 0.3s",
+                            }}
+                          />
+                          <div
+                            style={{
+                              flex: 1,
+                              height: "4px",
+                              borderRadius: "2px",
+                              background: engineActive[i]
+                                ? "oklch(0.50 0.18 148 / 0.61)"
+                                : "oklch(0.18 0.02 242)",
+                              transition: "background 0.3s",
+                            }}
+                          />
+                          <div
+                            style={{
+                              flex: 1,
+                              height: "4px",
+                              borderRadius: "2px",
+                              background: engineActive[i]
+                                ? "oklch(0.55 0.18 148 / 0.68)"
+                                : "oklch(0.18 0.02 242)",
+                              transition: "background 0.3s",
+                            }}
+                          />
+                          <div
+                            style={{
+                              flex: 1,
+                              height: "4px",
+                              borderRadius: "2px",
+                              background: engineActive[i]
+                                ? "oklch(0.60 0.18 148 / 0.75)"
+                                : "oklch(0.18 0.02 242)",
+                              transition: "background 0.3s",
+                            }}
+                          />
+                          <div
+                            style={{
+                              flex: 1,
+                              height: "4px",
+                              borderRadius: "2px",
+                              background: engineActive[i]
+                                ? "oklch(0.65 0.18 148 / 0.82)"
+                                : "oklch(0.18 0.02 242)",
+                              transition: "background 0.3s",
+                            }}
+                          />
+                          <div
+                            style={{
+                              flex: 1,
+                              height: "4px",
+                              borderRadius: "2px",
+                              background: engineActive[i]
+                                ? "oklch(0.70 0.18 148 / 0.89)"
+                                : "oklch(0.18 0.02 242)",
+                              transition: "background 0.3s",
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </motion.div>
+                  );
+                })}
+              </div>
 
               {/* LOUDNESS SLIDER */}
               <motion.div
@@ -2149,17 +2465,45 @@ export default function App() {
                 className="rounded p-3"
                 style={{
                   background: "oklch(0.10 0.014 242)",
-                  border: "1px solid oklch(0.40 0.16 75)",
-                  boxShadow: "0 0 14px oklch(0.72 0.22 75 / 0.1)",
+                  border: `1px solid ${commanderOn ? "oklch(0.55 0.22 148)" : "oklch(0.40 0.16 75)"}`,
+                  boxShadow: commanderOn
+                    ? "0 0 20px oklch(0.65 0.26 148 / 0.3)"
+                    : "0 0 14px oklch(0.72 0.22 75 / 0.1)",
+                  transition: "all 0.3s ease",
                 }}
               >
-                <SectionLabel>◈ COMMANDER MEMORY</SectionLabel>
+                <div className="flex items-center justify-between mb-2">
+                  <SectionLabel>◈ COMMANDER MEMORY</SectionLabel>
+                  <button
+                    type="button"
+                    data-ocid="commander.toggle"
+                    onClick={() => setCommanderOn((v) => !v)}
+                    className="font-mono text-[8px] px-2 py-0.5 rounded transition-all"
+                    style={{
+                      background: commanderOn
+                        ? "oklch(0.12 0.06 148)"
+                        : "oklch(0.09 0.01 242)",
+                      border: `1px solid ${commanderOn ? "oklch(0.55 0.22 148)" : "oklch(0.22 0.04 242)"}`,
+                      color: commanderOn
+                        ? "oklch(0.80 0.26 148)"
+                        : "oklch(0.40 0.04 242)",
+                      boxShadow: commanderOn
+                        ? "0 0 10px oklch(0.72 0.26 148 / 0.4)"
+                        : "none",
+                    }}
+                  >
+                    {commanderOn ? "⚡ COMMANDER ON" : "COMMANDER OFF"}
+                  </button>
+                </div>
                 <div className="mt-2 grid grid-cols-1 gap-1.5">
                   <div
                     className="flex items-center justify-between rounded px-2 py-1.5"
                     style={{
                       background: "oklch(0.09 0.01 242)",
-                      border: "1px solid oklch(0.28 0.10 75)",
+                      border: `1px solid ${commanderOn ? "oklch(0.40 0.16 148)" : "oklch(0.28 0.10 75)"}`,
+                      boxShadow: commanderOn
+                        ? "0 0 12px oklch(0.55 0.22 148 / 0.2)"
+                        : "none",
                     }}
                   >
                     <span
@@ -2170,7 +2514,11 @@ export default function App() {
                     </span>
                     <span
                       className="font-mono text-[9px] font-bold"
-                      style={{ color: "oklch(0.82 0.26 75)" }}
+                      style={{
+                        color: commanderOn
+                          ? "oklch(0.82 0.26 148)"
+                          : "oklch(0.82 0.26 75)",
+                      }}
                     >
                       {commanderMemory.toLocaleString()} CMDS
                     </span>
@@ -2195,10 +2543,17 @@ export default function App() {
                     "COMMANDER STANDS ON EVERYTHING",
                   ].map((line) => (
                     <div key={line} className="flex items-center gap-2 px-1">
-                      <StatusDot on color="75" />
+                      <StatusDot
+                        on={commanderOn}
+                        color={commanderOn ? "148" : "75"}
+                      />
                       <span
                         className="font-mono text-[8px]"
-                        style={{ color: "oklch(0.55 0.12 75)" }}
+                        style={{
+                          color: commanderOn
+                            ? "oklch(0.55 0.22 148)"
+                            : "oklch(0.55 0.12 75)",
+                        }}
                       >
                         {line}
                       </span>
@@ -2335,7 +2690,7 @@ export default function App() {
                                 val > 0
                                   ? "oklch(0.74 0.26 148)"
                                   : val < 0
-                                    ? "oklch(0.72 0.28 25)"
+                                    ? "oklch(0.72 0.28 148)"
                                     : "oklch(0.35 0.04 242)",
                             }}
                           >
@@ -2363,7 +2718,7 @@ export default function App() {
                               accentColor:
                                 val >= 0
                                   ? "oklch(0.72 0.28 212)"
-                                  : "oklch(0.65 0.22 25)",
+                                  : "oklch(0.65 0.22 148)",
                             }}
                           />
                           <span
@@ -2421,7 +2776,112 @@ export default function App() {
                     }}
                   >
                     <SectionLabel>◈ AUTO FREQUENCY GENERATOR</SectionLabel>
-                    <div className="grid grid-cols-2 gap-2 mt-2">
+                    {/* Live Status Row */}
+                    <div className="flex items-center justify-between mt-2 mb-2">
+                      <div className="flex items-center gap-2">
+                        <div
+                          className="w-2 h-2 rounded-full"
+                          style={{
+                            background: playing
+                              ? "oklch(0.74 0.26 148)"
+                              : "oklch(0.28 0.04 242)",
+                            boxShadow: playing
+                              ? "0 0 8px oklch(0.74 0.26 148)"
+                              : "none",
+                            animation: playing ? "pulse 1s infinite" : "none",
+                          }}
+                        />
+                        <span
+                          className="font-mono text-[9px] font-bold"
+                          style={{
+                            color: playing
+                              ? "oklch(0.80 0.24 148)"
+                              : "oklch(0.38 0.04 242)",
+                          }}
+                        >
+                          {playing ? "GENERATOR ACTIVE" : "GENERATOR STANDBY"}
+                        </span>
+                      </div>
+                      <span
+                        className="font-mono text-[8px] px-2 py-0.5 rounded"
+                        style={{
+                          background: "oklch(0.12 0.06 212)",
+                          border: "1px solid oklch(0.40 0.16 212)",
+                          color: "oklch(0.82 0.26 212)",
+                        }}
+                      >
+                        {autoFreqProfile}
+                      </span>
+                    </div>
+                    {/* Spectrum Bars */}
+                    <div className="flex items-end gap-0.5 h-8 mb-2">
+                      {autoFreqBars.map((bar, bi) => {
+                        const barColors = [
+                          "196",
+                          "196",
+                          "212",
+                          "212",
+                          "148",
+                          "148",
+                          "75",
+                          "75",
+                        ];
+                        const barKeys = [
+                          "b0",
+                          "b1",
+                          "b2",
+                          "b3",
+                          "b4",
+                          "b5",
+                          "b6",
+                          "b7",
+                        ];
+                        return (
+                          <div
+                            key={barKeys[bi]}
+                            className="flex-1 rounded-t transition-all"
+                            style={{
+                              height: `${Math.max(4, bar)}%`,
+                              background: `oklch(0.65 0.20 ${barColors[bi]})`,
+                              boxShadow:
+                                bar > 40
+                                  ? `0 0 4px oklch(0.65 0.20 ${barColors[bi]})`
+                                  : "none",
+                            }}
+                          />
+                        );
+                      })}
+                    </div>
+                    {/* Profile info */}
+                    <div
+                      className="rounded p-2 mb-2"
+                      style={{
+                        background: "oklch(0.08 0.01 242)",
+                        border: "1px solid oklch(0.22 0.06 242)",
+                      }}
+                    >
+                      <div
+                        className="font-mono text-[7px]"
+                        style={{ color: "oklch(0.38 0.04 242)" }}
+                      >
+                        LAST ADJUSTMENT APPLIED
+                      </div>
+                      <div
+                        className="font-mono text-[8px] mt-0.5"
+                        style={{ color: "oklch(0.65 0.16 212)" }}
+                      >
+                        {autoFreqProfile === "BASS HEAVY" &&
+                          "ENG1→80Hz · EQ BND 1-2 +2dB"}
+                        {autoFreqProfile === "MIDRANGE FOCUSED" &&
+                          "ENG2→400Hz · ENG3→1.5kHz"}
+                        {autoFreqProfile === "BRIGHT/AIRY" &&
+                          "ENG4→8kHz · EQ BND 8-10 +1.5dB"}
+                        {autoFreqProfile === "BALANCED" &&
+                          "ALL ENGINES AT DEFAULT FREQ"}
+                      </div>
+                    </div>
+                    {/* Generator toggles */}
+                    <div className="grid grid-cols-2 gap-2">
                       {[
                         {
                           label: "BASS GENERATOR",
@@ -2446,7 +2906,7 @@ export default function App() {
                         >
                           <div className="flex items-center justify-between mb-1">
                             <span
-                              className="font-mono text-[8px]"
+                              className="font-mono text-[7px]"
                               style={{ color: `oklch(0.65 0.18 ${gen.color})` }}
                             >
                               {gen.label}
@@ -2469,14 +2929,6 @@ export default function App() {
                           </div>
                           <div
                             className="font-mono text-[7px]"
-                            style={{ color: `oklch(0.38 0.06 ${gen.color})` }}
-                          >
-                            {gen.label === "BASS GENERATOR"
-                              ? "SELECTS BEST BASS TYPE"
-                              : "SELECTS BEST HIGHS"}
-                          </div>
-                          <div
-                            className="font-mono text-[7px]"
                             style={{ color: `oklch(0.35 0.04 ${gen.color})` }}
                           >
                             AUTO CONNECTED TO SONG
@@ -2484,54 +2936,11 @@ export default function App() {
                         </div>
                       ))}
                     </div>
-                    <div className="grid grid-cols-2 gap-1 mt-2">
-                      <div
-                        className="rounded px-2 py-1"
-                        style={{
-                          background: "oklch(0.08 0.01 242)",
-                          border: "1px solid oklch(0.20 0.04 242)",
-                        }}
-                      >
-                        <div
-                          className="font-mono text-[7px]"
-                          style={{ color: "oklch(0.38 0.04 242)" }}
-                        >
-                          JAZZ FREQ SWITCH
-                        </div>
-                        <div
-                          className="font-mono text-[8px]"
-                          style={{ color: "oklch(0.65 0.18 75)" }}
-                        >
-                          VIA 1 BILLION
-                        </div>
-                      </div>
-                      <div
-                        className="rounded px-2 py-1"
-                        style={{
-                          background: "oklch(0.08 0.01 242)",
-                          border: "1px solid oklch(0.20 0.04 242)",
-                        }}
-                      >
-                        <div
-                          className="font-mono text-[7px]"
-                          style={{ color: "oklch(0.38 0.04 242)" }}
-                        >
-                          SPEAKER PROTECTION
-                        </div>
-                        <div
-                          className="font-mono text-[8px]"
-                          style={{ color: "oklch(0.65 0.18 148)" }}
-                        >
-                          2 SAFE POINTS ✓
-                        </div>
-                      </div>
-                    </div>
                     <div
                       className="mt-1 font-mono text-[7px] text-center"
                       style={{ color: "oklch(0.32 0.04 242)" }}
                     >
-                      INTELLIGENT GENERATOR · 20 SMART CHIPS · BOTH BASS & HIGHS
-                      LIKE TWEETERS
+                      INTELLIGENT · 20 SMART CHIPS · BOTH BASS & HIGHS
                     </div>
                   </motion.div>
 

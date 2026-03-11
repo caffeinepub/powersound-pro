@@ -164,6 +164,7 @@ export function BatteryDisplay({
             />
           </div>
 
+          {/* Powers audio output label */}
           <div className="text-center">
             <span
               className="font-display font-black text-xl leading-none tracking-tight"
@@ -176,9 +177,9 @@ export function BatteryDisplay({
             </span>
             <div
               className="font-mono text-[9px] mt-0.5"
-              style={{ color: "oklch(0.45 0.02 220)" }}
+              style={{ color: "oklch(0.65 0.20 212)" }}
             >
-              CAPACITY
+              APP POWER
             </div>
           </div>
 
@@ -200,6 +201,28 @@ export function BatteryDisplay({
                 }}
               />
             ))}
+          </div>
+
+          {/* Powers audio output indicator */}
+          <div
+            className="w-full rounded px-2 py-1 text-center"
+            style={{
+              background: "oklch(0.08 0.02 212)",
+              border: "1px solid oklch(0.22 0.06 212 / 0.6)",
+            }}
+          >
+            <div
+              className="font-mono text-[8px] font-bold tracking-[0.25em]"
+              style={{ color: "oklch(0.58 0.16 212)" }}
+            >
+              POWERS AUDIO OUTPUT
+            </div>
+            <div
+              className="font-mono text-[8px] mt-0.5"
+              style={{ color: "oklch(0.42 0.06 212)" }}
+            >
+              BATTERY % = OUTPUT POWER
+            </div>
           </div>
         </div>
 

@@ -161,14 +161,52 @@ function BookAnimation({ onDone }: { onDone: () => void }) {
 }
 
 // ─── AUDIO ENGINE ──────────────────────────────────────────────────────────────
-// ZERO GAIN PARALLEL CHAIN:
-// source → SignalGuardian → [Engine1 ┐
-//                            Engine2 ├→ engineMerge] → EQ×10 → Bass80 → Stab1 → Stab2 → destination
-//                            Engine3 │
-//                            Engine4 ┘
+// ZERO GAIN SERIES CHAIN:
+// source → SignalGuardian → Engine1(lowshelf) → Engine2(peaking) → Engine3(peaking) → Engine4(highshelf)
+//       → engineMerge → EQ×10 → Bass80 → Stab1 → Stab2 → EQ31×31 → destination
 // No GainNode multipliers anywhere. Battery powers the amp only.
 
 const EQ_FREQS = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+
+// 31-band 1/3-octave center frequencies
+const EQ31_FREQS = [
+  20, 25, 31.5, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630,
+  800, 1000, 1250, 1600, 2000, 2500, 3150, 4000, 5000, 6300, 8000, 10000, 12500,
+  16000, 20000,
+];
+
+function eq31Label(f: number): string {
+  if (f >= 1000) {
+    const k = f / 1000;
+    return k === Math.floor(k) ? `${k}k` : `${k}k`;
+  }
+  return `${f}`;
+}
+
+// Genre presets for 31-band EQ (dB values per band)
+const EQ31_PRESETS: Record<string, number[]> = {
+  FLAT: Array(31).fill(0),
+  ROCK: [
+    4, 4, 3, 3, 2, 1, 0, 0, -1, -1, -1, 0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3, 4,
+    5, 5, 4, 3, 2, 1, 0,
+  ],
+  "HIP-HOP": [
+    6, 6, 5, 5, 4, 3, 2, 2, 1, 0, -1, -1, -2, -2, -1, 0, 0, 0, 1, 1, 0, -1, -1,
+    0, 1, 2, 3, 3, 2, 1, 0,
+  ],
+  POP: [
+    1, 1, 1, 2, 2, 1, 0, 0, -1, -1, -1, 0, 1, 2, 3, 4, 4, 3, 2, 1, 1, 2, 3, 3,
+    2, 1, 0, 0, 1, 1, 1,
+  ],
+};
+
+// Original filter definitions (type + frequency)
+const ENGINE_DEFS: [BiquadFilterType, number][] = [
+  ["lowshelf", 200], // Engine 1: shapes bass region
+  ["peaking", 700], // Engine 2: shapes low-mids
+  ["peaking", 3500], // Engine 3: shapes high-mids
+  ["highshelf", 6000], // Engine 4: shapes highs/air
+];
 
 interface AudioChain {
   ctx: AudioContext;
@@ -180,6 +218,7 @@ interface AudioChain {
   bass80: BiquadFilterNode;
   stab1: DynamicsCompressorNode;
   stab2: DynamicsCompressorNode;
+  eq31Bands: BiquadFilterNode[];
 }
 
 function buildChain(ctx: AudioContext, el: HTMLAudioElement): AudioChain {
@@ -193,18 +232,13 @@ function buildChain(ctx: AudioContext, el: HTMLAudioElement): AudioChain {
   signalGuardian.attack.value = 0.003;
   signalGuardian.release.value = 0.1;
 
-  // 4 Engines — pure BiquadFilter signal shapers, ZERO gain
-  const engineDefs: [BiquadFilterType, number][] = [
-    ["lowpass", 200],
-    ["bandpass", 500],
-    ["bandpass", 3000],
-    ["highpass", 6000],
-  ];
-  const engines = engineDefs.map(([type, freq]) => {
+  // 4 Engines — pure BiquadFilter signal shapers, ZERO gain, wired SERIES
+  const engines = ENGINE_DEFS.map(([type, freq]) => {
     const f = ctx.createBiquadFilter();
     f.type = type;
     f.frequency.value = freq;
     f.Q.value = 1.0;
+    f.gain.value = 0; // neutral — no boost, no cut
     return f;
   });
 
@@ -226,11 +260,11 @@ function buildChain(ctx: AudioContext, el: HTMLAudioElement): AudioChain {
     return f;
   });
 
-  // 80Hz Bass programme — lowpass sweep, NO gain boost
+  // 80Hz Bass programme — lowshelf, flat start, passes all higher frequencies through unchanged
   const bass80 = ctx.createBiquadFilter();
-  bass80.type = "lowpass";
+  bass80.type = "lowshelf";
   bass80.frequency.value = 80;
-  bass80.Q.value = Math.SQRT1_2;
+  bass80.gain.value = 0; // flat start, no boost — signal shaping only
 
   // Stabilizer Stage 1 — 800,000,000 gentle (ratio 2:1)
   const stab1 = ctx.createDynamicsCompressor();
@@ -248,32 +282,45 @@ function buildChain(ctx: AudioContext, el: HTMLAudioElement): AudioChain {
   stab2.attack.value = 0.001;
   stab2.release.value = 0.15;
 
-  // ── Wire the chain ──────────────────────────────────────────────────────────
-  // source → signalGuardian
+  // 31-band graphic EQ — peaking filters, Q=1.4, gain=0 at start
+  const eq31Bands = EQ31_FREQS.map((freq) => {
+    const f = ctx.createBiquadFilter();
+    f.type = "peaking";
+    f.frequency.value = freq;
+    f.Q.value = 1.4;
+    f.gain.value = 0;
+    return f;
+  });
+
+  // ── Wire the chain — SERIES ─────────────────────────────────────────────────
+  // source → signalGuardian → engine1..4 → engineMerge → EQ10 → bass80 → stab1 → stab2 → EQ31 → destination
   source.connect(signalGuardian);
-
-  // signalGuardian → all 4 engines in PARALLEL (fan out)
+  let eNode: AudioNode = signalGuardian;
   for (const e of engines) {
-    signalGuardian.connect(e);
+    eNode.connect(e);
+    eNode = e;
   }
+  eNode.connect(engineMerge);
 
-  // each engine → engineMerge (fan in)
-  for (const e of engines) {
-    e.connect(engineMerge);
-  }
-
-  // engineMerge → EQ bands in series
+  // engineMerge → 10-band EQ in series
   let node: AudioNode = engineMerge;
   for (const b of eqBands) {
     node.connect(b);
     node = b;
   }
 
-  // → bass80 → stab1 → stab2 → destination
+  // → bass80 → stab1 → stab2
   node.connect(bass80);
   bass80.connect(stab1);
   stab1.connect(stab2);
-  stab2.connect(ctx.destination);
+
+  // stab2 → 31-band EQ in series → destination
+  let n31: AudioNode = stab2;
+  for (const b of eq31Bands) {
+    n31.connect(b);
+    n31 = b;
+  }
+  n31.connect(ctx.destination);
 
   return {
     ctx,
@@ -285,6 +332,7 @@ function buildChain(ctx: AudioContext, el: HTMLAudioElement): AudioChain {
     bass80,
     stab1,
     stab2,
+    eq31Bands,
   };
 }
 
@@ -386,8 +434,130 @@ function EQSlider({
   );
 }
 
+// ─── 31-BAND EQ SLIDER ────────────────────────────────────────────────────────
+function Eq31Slider({
+  freq,
+  value,
+  onChange,
+}: { freq: number; value: number; onChange: (v: number) => void }) {
+  const label = eq31Label(freq);
+  // Color the slider track based on value
+  const barColor = value > 0 ? GREEN : value < 0 ? "#ff4455" : BLUE;
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 2,
+        minWidth: 22,
+        flex: "0 0 auto",
+      }}
+    >
+      {/* dB readout */}
+      <span
+        style={{
+          color: barColor,
+          fontSize: 8,
+          fontWeight: 700,
+          lineHeight: 1,
+          minHeight: 10,
+          textAlign: "center",
+          letterSpacing: 0,
+        }}
+      >
+        {value > 0 ? `+${value}` : value === 0 ? "0" : value}
+      </span>
+      {/* Vertical slider */}
+      <div
+        style={{
+          position: "relative",
+          height: 100,
+          width: 20,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        {/* Center tick line */}
+        <div
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: "50%",
+            transform: "translate(-50%, -50%)",
+            width: 14,
+            height: 1,
+            background: `${BLUE}44`,
+            pointerEvents: "none",
+            zIndex: 1,
+          }}
+        />
+        <input
+          type="range"
+          min={-12}
+          max={12}
+          step={0.5}
+          value={value}
+          onChange={(e) => onChange(Number(e.target.value))}
+          data-ocid={`eq31.slider.${label}`}
+          style={{
+            writingMode: "vertical-lr" as const,
+            direction: "rtl" as const,
+            height: 100,
+            width: 20,
+            cursor: "pointer",
+            accentColor: barColor,
+            background: "transparent",
+          }}
+        />
+      </div>
+      {/* Freq label */}
+      <span
+        style={{
+          color: "#4488aa",
+          fontSize: 7,
+          lineHeight: 1,
+          textAlign: "center",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
+
 // ─── MAIN APP ──────────────────────────────────────────────────────────────────
 const CHIP_IDS = Array.from({ length: 20 }, (_, i) => `chip-id-${i + 1}`);
+
+const ENGINE_INFO = [
+  {
+    label: "ENGINE 1",
+    type: "LOWSHELF",
+    range: "BASS REGION",
+    color: "#0055ff",
+  },
+  {
+    label: "ENGINE 2",
+    type: "PEAKING",
+    range: "LOW-MIDS 700Hz",
+    color: "#0088ff",
+  },
+  {
+    label: "ENGINE 3",
+    type: "PEAKING",
+    range: "HIGH-MIDS 3.5kHz",
+    color: "#00aaff",
+  },
+  {
+    label: "ENGINE 4",
+    type: "HIGHSHELF",
+    range: "HIGHS/AIR 6kHz+",
+    color: "#00ccff",
+  },
+];
 
 export default function App() {
   const [showBook, setShowBook] = useState(true);
@@ -399,6 +569,8 @@ export default function App() {
   const [bass80Freq, setBass80Freq] = useState(80);
   const [routeMode, setRouteMode] = useState<"both" | "bass" | "highs">("both");
   const [eqGains, setEqGains] = useState<number[]>(Array(10).fill(0));
+  const [eq31Gains, setEq31Gains] = useState<number[]>(Array(31).fill(0));
+  const [activePreset, setActivePreset] = useState<string>("FLAT");
   const [chipStates, setChipStates] = useState<boolean[]>(Array(20).fill(true));
   const [healingOn, setHealingOn] = useState(true);
   const [restoringOn, setRestoringOn] = useState(true);
@@ -406,6 +578,13 @@ export default function App() {
   const [memLog, setMemLog] = useState<string[]>([]);
   const [freqProfile, setFreqProfile] = useState<string>("Analyzing...");
   const [engineActivity, setEngineActivity] = useState([0, 0, 0, 0]);
+  // Engine ON/OFF switches — when OFF the filter becomes "allpass" (transparent bypass)
+  const [engineActive, setEngineActive] = useState<boolean[]>([
+    true,
+    true,
+    true,
+    true,
+  ]);
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const chainRef = useRef<AudioChain | null>(null);
@@ -445,6 +624,7 @@ export default function App() {
     // Analyser for VU and frequency detection
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 256;
+    // Connect analyser in parallel from stab2 (last 31-band node already goes to destination)
     chain.stab2.connect(analyser);
     analyserRef.current = analyser;
   }, []);
@@ -558,10 +738,57 @@ export default function App() {
     }
   }
 
-  // Bass80 slider — sweeps filter frequency only
+  // 31-band EQ apply
+  function setEq31Band(i: number, val: number) {
+    const next = [...eq31Gains];
+    next[i] = val;
+    setEq31Gains(next);
+    setActivePreset("CUSTOM");
+    if (chainRef.current?.eq31Bands[i]) {
+      chainRef.current.eq31Bands[i].gain.value = val;
+    }
+  }
+
+  function applyEq31Preset(name: string) {
+    const gains = EQ31_PRESETS[name];
+    if (!gains) return;
+    setEq31Gains([...gains]);
+    setActivePreset(name);
+    if (chainRef.current) {
+      gains.forEach((g, i) => {
+        if (chainRef.current!.eq31Bands[i]) {
+          chainRef.current!.eq31Bands[i].gain.value = g;
+        }
+      });
+    }
+    logMem(`31-Band EQ preset: ${name}`);
+  }
+
+  // Bass80 slider — sweeps shelf frequency only
   function setBassFreq(v: number) {
     setBass80Freq(v);
     if (chainRef.current) chainRef.current.bass80.frequency.value = v;
+  }
+
+  // Engine ON/OFF toggle — switches between original filter type and "allpass" bypass
+  function toggleEngine(i: number) {
+    const next = [...engineActive];
+    next[i] = !next[i];
+    setEngineActive(next);
+    const chain = chainRef.current;
+    if (chain) {
+      const eng = chain.engines[i];
+      if (next[i]) {
+        // Restore original filter type
+        eng.type = ENGINE_DEFS[i][0];
+        eng.frequency.value = ENGINE_DEFS[i][1];
+        eng.gain.value = 0;
+      } else {
+        // Bypass: allpass passes everything unchanged
+        eng.type = "allpass";
+      }
+    }
+    logMem(`Engine ${i + 1} ${next[i] ? "ON" : "OFF"}`);
   }
 
   // Smart chip toggle
@@ -577,16 +804,16 @@ export default function App() {
     setRouteMode(mode);
     const chain = chainRef.current;
     if (!chain) return;
-    // Engine 1 (lowpass) and Engine 4 (highpass) routing via frequency adjustment
+    // Engine 1 (lowshelf) and Engine 4 (highshelf) routing via frequency adjustment
     if (mode === "bass") {
-      chain.engines[3].frequency.value = 200; // push highpass up, attenuating highs
+      chain.engines[3].frequency.value = 200; // push highshelf up, attenuating highs
       logMem("ROUTE: Bass Only");
     } else if (mode === "highs") {
-      chain.engines[0].frequency.value = 80; // push lowpass down, attenuating bass
+      chain.engines[0].frequency.value = 80; // push lowshelf down, attenuating bass
       logMem("ROUTE: Highs Only");
     } else {
-      chain.engines[0].frequency.value = 200;
-      chain.engines[3].frequency.value = 6000;
+      chain.engines[0].frequency.value = ENGINE_DEFS[0][1];
+      chain.engines[3].frequency.value = ENGINE_DEFS[3][1];
       logMem("ROUTE: Bass + Highs");
     }
   }
@@ -635,6 +862,27 @@ export default function App() {
         @keyframes chargePulse {
           0%, 100% { box-shadow: 0 0 10px #ffcc0066; transform: scale(1); }
           50% { box-shadow: 0 0 24px #ffcc00cc; transform: scale(1.06); }
+        }
+        /* 31-band EQ vertical slider track custom */
+        .eq31-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 14px;
+          height: 14px;
+          border-radius: 3px;
+          background: #00aaff;
+          border: 2px solid #00ffcc;
+          box-shadow: 0 0 6px #00aaff88;
+          cursor: pointer;
+        }
+        .eq31-slider::-moz-range-thumb {
+          width: 14px;
+          height: 14px;
+          border-radius: 3px;
+          background: #00aaff;
+          border: 2px solid #00ffcc;
+          box-shadow: 0 0 6px #00aaff88;
+          cursor: pointer;
         }
       `}</style>
       <div style={{ maxWidth: 420, margin: "0 auto", padding: "10px 12px" }}>
@@ -869,91 +1117,98 @@ export default function App() {
           )}
         </Panel>
 
-        {/* 4 Sound Engines — Pure Signal Panels */}
+        {/* 4 Sound Engines — Pure Signal Panels with ON/OFF switch */}
         <Panel title="SOUND ENGINES — A+B+C+D CLASS — SIGNAL ONLY">
           <div
             style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}
           >
-            {[
-              {
-                label: "ENGINE 1",
-                type: "LOWPASS",
-                range: "0–200Hz",
-                color: "#0055ff",
-              },
-              {
-                label: "ENGINE 2",
-                type: "BANDPASS",
-                range: "200–1kHz",
-                color: "#0088ff",
-              },
-              {
-                label: "ENGINE 3",
-                type: "BANDPASS",
-                range: "1k–6kHz",
-                color: "#00aaff",
-              },
-              {
-                label: "ENGINE 4",
-                type: "HIGHPASS",
-                range: "6k–20kHz",
-                color: "#00ccff",
-              },
-            ].map((e, i) => (
-              <div
-                key={e.label}
-                style={{
-                  background: "#000d1a",
-                  border: `1px solid ${g ? DIM : BORDER}`,
-                  borderRadius: 6,
-                  padding: "8px 10px",
-                }}
-              >
+            {ENGINE_INFO.map((e, i) => {
+              const isOn = engineActive[i];
+              return (
                 <div
+                  key={e.label}
                   style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    marginBottom: 4,
+                    background: "#000d1a",
+                    border: `1px solid ${isOn && g ? DIM : BORDER}`,
+                    borderRadius: 6,
+                    padding: "8px 10px",
+                    opacity: isOn ? 1 : 0.5,
+                    transition: "opacity 0.2s",
                   }}
                 >
-                  <span
-                    style={{
-                      color: g ? GREEN : "#aaa",
-                      fontSize: 10,
-                      fontWeight: 700,
-                    }}
-                  >
-                    {e.label}
-                  </span>
-                  <GreenDot active={g} />
-                </div>
-                <div style={{ color: "#5599cc", fontSize: 9 }}>{e.type}</div>
-                <div style={{ color: "#3366aa", fontSize: 9 }}>{e.range}</div>
-                {/* Activity bar */}
-                <div
-                  style={{
-                    height: 4,
-                    background: "#001122",
-                    borderRadius: 2,
-                    marginTop: 6,
-                    overflow: "hidden",
-                  }}
-                >
+                  {/* Header row: label + status dot + ON/OFF button */}
                   <div
                     style={{
-                      height: "100%",
-                      width: `${engineActivity[i] * 100}%`,
-                      background: e.color,
-                      transition: "width 0.1s",
-                      boxShadow: `0 0 4px ${e.color}`,
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginBottom: 4,
                     }}
-                  />
+                  >
+                    <span
+                      style={{
+                        color: isOn && g ? GREEN : "#aaa",
+                        fontSize: 10,
+                        fontWeight: 700,
+                      }}
+                    >
+                      {e.label}
+                    </span>
+                    <div
+                      style={{ display: "flex", alignItems: "center", gap: 4 }}
+                    >
+                      <GreenDot active={isOn && g} />
+                      <button
+                        type="button"
+                        data-ocid={`engine.toggle.${i + 1}`}
+                        onClick={() => toggleEngine(i)}
+                        style={{
+                          background: isOn ? GREEN : "#001428",
+                          border: `1px solid ${isOn ? GREEN : BORDER}`,
+                          color: isOn ? "#000" : "#5599cc",
+                          borderRadius: 3,
+                          padding: "1px 6px",
+                          cursor: "pointer",
+                          fontSize: 8,
+                          fontWeight: 900,
+                          letterSpacing: 1,
+                          lineHeight: "14px",
+                        }}
+                      >
+                        {isOn ? "ON" : "OFF"}
+                      </button>
+                    </div>
+                  </div>
+                  <div style={{ color: "#5599cc", fontSize: 9 }}>{e.type}</div>
+                  <div style={{ color: "#3366aa", fontSize: 9 }}>{e.range}</div>
+                  {/* Activity bar */}
+                  <div
+                    style={{
+                      height: 4,
+                      background: "#001122",
+                      borderRadius: 2,
+                      marginTop: 6,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        width: isOn ? `${engineActivity[i] * 100}%` : "0%",
+                        background: e.color,
+                        transition: "width 0.1s",
+                        boxShadow: `0 0 4px ${e.color}`,
+                      }}
+                    />
+                  </div>
+                  <div style={{ color: "#3366aa", fontSize: 8, marginTop: 3 }}>
+                    {isOn
+                      ? "SERIES — SIGNAL ONLY — NO GAIN"
+                      : "BYPASSED — ALLPASS"}
+                  </div>
                 </div>
-                <div style={{ color: "#3366aa", fontSize: 8, marginTop: 3 }}>
-                  PARALLEL — SIGNAL ONLY — NO GAIN
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </Panel>
 
@@ -1010,6 +1265,229 @@ export default function App() {
           </div>
         </Panel>
 
+        {/* ═══════════════════════════════════════════════════════════════════ */}
+        {/* POWERSOUND PRO 31-BAND GRAPHIC EQ                                  */}
+        {/* ═══════════════════════════════════════════════════════════════════ */}
+        <div
+          style={{
+            background:
+              "linear-gradient(180deg, #000d1a 0%, #001428 60%, #000c18 100%)",
+            border: `1px solid ${BLUE}`,
+            borderRadius: 10,
+            padding: "12px 14px 10px",
+            marginBottom: 10,
+            boxShadow: `0 0 24px ${BLUE}22, inset 0 0 40px #00001088`,
+          }}
+        >
+          {/* Panel header */}
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "flex-end",
+              marginBottom: 10,
+            }}
+          >
+            <div>
+              <div
+                style={{
+                  color: BLUE,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  letterSpacing: 2,
+                  textTransform: "uppercase",
+                  lineHeight: 1,
+                }}
+              >
+                POWERSOUND PRO
+              </div>
+              <div
+                style={{
+                  color: GREEN,
+                  fontSize: 9,
+                  letterSpacing: 3,
+                  marginTop: 2,
+                  fontWeight: 700,
+                }}
+              >
+                31-BAND GRAPHIC EQ
+              </div>
+              <div style={{ color: "#3366aa", fontSize: 8, marginTop: 1 }}>
+                1/3-OCTAVE · PEAKING · Q=1.4 · ZERO GAIN MANDATE
+              </div>
+            </div>
+            {/* Active preset badge */}
+            <div
+              style={{
+                background: "#001f5c",
+                border: `1px solid ${BLUE}`,
+                borderRadius: 4,
+                padding: "3px 8px",
+                color: BLUE,
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: 1,
+                minWidth: 52,
+                textAlign: "center",
+              }}
+            >
+              {activePreset}
+            </div>
+          </div>
+
+          {/* dB scale markers */}
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "flex-end",
+              gap: 0,
+              marginBottom: 2,
+              paddingRight: 4,
+            }}
+          >
+            {["+12", "+6", "0", "-6", "-12"].map((lbl) => (
+              <span
+                key={lbl}
+                style={{
+                  color: "#224466",
+                  fontSize: 7,
+                  width: 20,
+                  textAlign: "right",
+                }}
+              >
+                {lbl}
+              </span>
+            ))}
+          </div>
+
+          {/* Sliders row — horizontally scrollable */}
+          <div
+            style={{
+              overflowX: "auto",
+              overflowY: "hidden",
+              paddingBottom: 4,
+              /* Custom scrollbar */
+              scrollbarWidth: "thin",
+              scrollbarColor: `${BLUE}44 #000d1a`,
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                gap: 3,
+                padding: "0 2px",
+                minWidth: "max-content",
+              }}
+            >
+              {EQ31_FREQS.map((freq, i) => (
+                <Eq31Slider
+                  key={freq}
+                  freq={freq}
+                  value={eq31Gains[i]}
+                  onChange={(v) => setEq31Band(i, v)}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* Frequency range indicators */}
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginTop: 4,
+              marginBottom: 10,
+            }}
+          >
+            {[
+              { label: "SUB", color: "#0044aa" },
+              { label: "BASS", color: "#0066cc" },
+              { label: "LOW-MID", color: "#0088ff" },
+              { label: "MID", color: "#00aaff" },
+              { label: "HIGH-MID", color: "#00ccff" },
+              { label: "HIGHS", color: GREEN },
+              { label: "AIR", color: "#aaffdd" },
+            ].map((r) => (
+              <span
+                key={r.label}
+                style={{ color: r.color, fontSize: 7, fontWeight: 700 }}
+              >
+                {r.label}
+              </span>
+            ))}
+          </div>
+
+          {/* Preset buttons */}
+          <div style={{ display: "flex", gap: 5 }}>
+            {["FLAT", "ROCK", "HIP-HOP", "POP"].map((preset) => {
+              const isActive = activePreset === preset;
+              return (
+                <button
+                  key={preset}
+                  type="button"
+                  data-ocid={
+                    preset === "FLAT"
+                      ? "eq31.flat_button"
+                      : preset === "ROCK"
+                        ? "eq31.rock_button"
+                        : preset === "HIP-HOP"
+                          ? "eq31.hiphop_button"
+                          : "eq31.pop_button"
+                  }
+                  onClick={() => applyEq31Preset(preset)}
+                  style={{
+                    flex: 1,
+                    background: isActive
+                      ? preset === "FLAT"
+                        ? BLUE
+                        : GREEN
+                      : "#001428",
+                    border: `1px solid ${
+                      isActive ? (preset === "FLAT" ? BLUE : GREEN) : BORDER
+                    }`,
+                    color: isActive ? "#000" : "#5599cc",
+                    borderRadius: 5,
+                    padding: "6px 2px",
+                    cursor: "pointer",
+                    fontSize: 9,
+                    fontWeight: 900,
+                    letterSpacing: 1,
+                    boxShadow: isActive
+                      ? `0 0 8px ${preset === "FLAT" ? BLUE : GREEN}66`
+                      : "none",
+                    transition: "all 0.15s",
+                  }}
+                >
+                  {preset}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Bottom status strip */}
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginTop: 8,
+              paddingTop: 6,
+              borderTop: `1px solid ${BORDER}`,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <GreenDot active={g} />
+              <span style={{ color: g ? GREEN : "#3366aa", fontSize: 8 }}>
+                COMMANDER LINKED
+              </span>
+            </div>
+            <span style={{ color: "#224466", fontSize: 8 }}>
+              CHAIN: STAB2 → EQ31[0..30] → DEST
+            </span>
+            <span style={{ color: "#224466", fontSize: 8 }}>NO GAIN</span>
+          </div>
+        </div>
+
         {/* 80Hz Bass Programme */}
         <Panel title="80HZ BASS PROGRAMME">
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -1041,7 +1519,7 @@ export default function App() {
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span style={{ color: "#3366aa", fontSize: 9 }}>40Hz</span>
                 <span style={{ color: "#3366aa", fontSize: 9 }}>
-                  FILTER SWEEP — NO GAIN
+                  BASS SHELF — NO GAIN
                 </span>
                 <span style={{ color: "#3366aa", fontSize: 9 }}>200Hz</span>
               </div>

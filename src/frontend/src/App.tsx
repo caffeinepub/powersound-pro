@@ -161,7 +161,11 @@ function BookAnimation({ onDone }: { onDone: () => void }) {
 }
 
 // ─── AUDIO ENGINE ──────────────────────────────────────────────────────────────
-// ZERO GAIN CHAIN: source → SignalGuardian → Engine1-4 → EQ×10 → Bass80 → Stab1 → Stab2 → destination
+// ZERO GAIN PARALLEL CHAIN:
+// source → SignalGuardian → [Engine1 ┐
+//                            Engine2 ├→ engineMerge] → EQ×10 → Bass80 → Stab1 → Stab2 → destination
+//                            Engine3 │
+//                            Engine4 ┘
 // No GainNode multipliers anywhere. Battery powers the amp only.
 
 const EQ_FREQS = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
@@ -171,6 +175,7 @@ interface AudioChain {
   source: MediaElementAudioSourceNode;
   signalGuardian: DynamicsCompressorNode;
   engines: BiquadFilterNode[];
+  engineMerge: DynamicsCompressorNode;
   eqBands: BiquadFilterNode[];
   bass80: BiquadFilterNode;
   stab1: DynamicsCompressorNode;
@@ -195,14 +200,21 @@ function buildChain(ctx: AudioContext, el: HTMLAudioElement): AudioChain {
     ["bandpass", 3000],
     ["highpass", 6000],
   ];
-  const engines = engineDefs.map(([type, freq], _idx) => {
+  const engines = engineDefs.map(([type, freq]) => {
     const f = ctx.createBiquadFilter();
     f.type = type;
     f.frequency.value = freq;
-    // Q at 1.0 = standard, no resonance boost
     f.Q.value = 1.0;
     return f;
   });
+
+  // Engine merge collector — ultra-transparent DynamicsCompressor (ratio 1:1 = pass-through)
+  const engineMerge = ctx.createDynamicsCompressor();
+  engineMerge.threshold.value = -100;
+  engineMerge.knee.value = 40;
+  engineMerge.ratio.value = 1;
+  engineMerge.attack.value = 0;
+  engineMerge.release.value = 0.25;
 
   // 10-band DJ EQ — peaking filters, gain controlled by slider
   const eqBands = EQ_FREQS.map((freq) => {
@@ -236,21 +248,30 @@ function buildChain(ctx: AudioContext, el: HTMLAudioElement): AudioChain {
   stab2.attack.value = 0.001;
   stab2.release.value = 0.15;
 
-  // Wire the chain
-  let node: AudioNode = source;
-  node.connect(signalGuardian);
-  node = signalGuardian;
+  // ── Wire the chain ──────────────────────────────────────────────────────────
+  // source → signalGuardian
+  source.connect(signalGuardian);
+
+  // signalGuardian → all 4 engines in PARALLEL (fan out)
   for (const e of engines) {
-    node.connect(e);
-    node = e;
+    signalGuardian.connect(e);
   }
+
+  // each engine → engineMerge (fan in)
+  for (const e of engines) {
+    e.connect(engineMerge);
+  }
+
+  // engineMerge → EQ bands in series
+  let node: AudioNode = engineMerge;
   for (const b of eqBands) {
     node.connect(b);
     node = b;
   }
+
+  // → bass80 → stab1 → stab2 → destination
   node.connect(bass80);
-  node = bass80;
-  node.connect(stab1);
+  bass80.connect(stab1);
   stab1.connect(stab2);
   stab2.connect(ctx.destination);
 
@@ -259,6 +280,7 @@ function buildChain(ctx: AudioContext, el: HTMLAudioElement): AudioChain {
     source,
     signalGuardian,
     engines,
+    engineMerge,
     eqBands,
     bass80,
     stab1,
@@ -555,7 +577,7 @@ export default function App() {
     setRouteMode(mode);
     const chain = chainRef.current;
     if (!chain) return;
-    // Engine 1 (lowpass) and Engine 4 (highpass) routing via Q adjustment
+    // Engine 1 (lowpass) and Engine 4 (highpass) routing via frequency adjustment
     if (mode === "bass") {
       chain.engines[3].frequency.value = 200; // push highpass up, attenuating highs
       logMem("ROUTE: Bass Only");
@@ -928,7 +950,7 @@ export default function App() {
                   />
                 </div>
                 <div style={{ color: "#3366aa", fontSize: 8, marginTop: 3 }}>
-                  SIGNAL ONLY — NO GAIN
+                  PARALLEL — SIGNAL ONLY — NO GAIN
                 </div>
               </div>
             ))}

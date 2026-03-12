@@ -1,1947 +1,2128 @@
+import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-// ===================== TYPES =====================
+// ─── CONSTANTS ───────────────────────────────────────────────────────────────
 
-interface Engine {
-  id: number;
-  label: string;
-  type: BiquadFilterType;
-  frequency: number;
-  range: string;
-  on: boolean;
-}
+const EQ10_FREQS = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+const EQ10_LABELS = [
+  "32",
+  "64",
+  "125",
+  "250",
+  "500",
+  "1K",
+  "2K",
+  "4K",
+  "8K",
+  "16K",
+];
 
-interface AudioStore {
-  ctx: AudioContext | null;
-  source: AudioBufferSourceNode | null;
-  analyser: AnalyserNode | null;
-  engines: BiquadFilterNode[];
-  compressor: DynamicsCompressorNode | null;
-  outputGain: GainNode | null;
-  eq10: BiquadFilterNode[];
-  eq31: BiquadFilterNode[];
-  bassFilter: BiquadFilterNode | null;
-  loudBoosterGain: GainNode | null;
-}
-
-// ===================== CONSTANTS =====================
-
-const EQ10_BANDS = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000];
-const EQ31_BANDS = [
+const EQ31_FREQS = [
   20, 25, 31.5, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630,
   800, 1000, 1250, 1600, 2000, 2500, 3150, 4000, 5000, 6300, 8000, 10000, 12500,
   16000, 20000,
 ];
-
-const ENGINE_CLASSES = ["A⁺", "B⁺", "C⁺", "D⁺"];
-
-const INITIAL_ENGINES: Engine[] = [
-  {
-    id: 1,
-    label: "ENGINE 1",
-    type: "lowpass",
-    frequency: 400,
-    range: "20Hz–400Hz",
-    on: true,
-  },
-  {
-    id: 2,
-    label: "ENGINE 2",
-    type: "bandpass",
-    frequency: 800,
-    range: "200Hz–2kHz",
-    on: true,
-  },
-  {
-    id: 3,
-    label: "ENGINE 3",
-    type: "bandpass",
-    frequency: 4000,
-    range: "1kHz–8kHz",
-    on: true,
-  },
-  {
-    id: 4,
-    label: "ENGINE 4",
-    type: "highpass",
-    frequency: 2500,
-    range: "2.5kHz–20kHz",
-    on: true,
-  },
+const EQ31_LABELS = [
+  "20",
+  "25",
+  "31",
+  "40",
+  "50",
+  "63",
+  "80",
+  "100",
+  "125",
+  "160",
+  "200",
+  "250",
+  "315",
+  "400",
+  "500",
+  "630",
+  "800",
+  "1K",
+  "1.2K",
+  "1.6K",
+  "2K",
+  "2.5K",
+  "3.1K",
+  "4K",
+  "5K",
+  "6.3K",
+  "8K",
+  "10K",
+  "12.5K",
+  "16K",
+  "20K",
 ];
 
-const ROCK_31 = [
-  4, 3, 2, 1, 0, -1, -2, -1, 0, 1, 2, 1, 0, -1, -2, -1, 0, 1, 2, 3, 2, 1, 0, -1,
-  -2, -1, 0, 1, 2, 3, 4,
-];
-const HIPHOP_31 = [
-  5, 4, 3, 2, 1, 1, 0, 0, -1, -1, -2, -1, 0, 1, 2, 2, 1, 0, -1, -2, -3, -2, -1,
-  0, 1, 2, 3, 4, 4, 3, 2,
-];
-const POP_31 = [
-  2, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 2, 1, 0, -1, -1, 0, 1, 2, 3, 3, 2, 1,
-  0, -1, 0, 1, 2, 2, 3,
-];
-const FLAT_31 = new Array(31).fill(0);
-
-const INSTRUMENT_EQ_PRESETS: { [key: string]: number[] } = {
-  FLAT: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-  BASS: [6, 5, 4, 2, 0, -2, -3, -4, -4, -5],
-  DRUMS: [5, 4, 3, 1, 0, 0, 1, 2, 3, 2],
-  GUITAR: [-2, -1, 0, 2, 3, 4, 3, 2, 1, 0],
-  VOCALS: [-3, -2, 0, 1, 3, 4, 4, 3, 2, 1],
-  KEYS: [0, 0, 1, 2, 3, 3, 2, 2, 1, 0],
-  SYNTH: [-2, -1, 0, 0, 2, 4, 5, 4, 3, 2],
+const INSTRUMENT_PRESETS: Record<string, number[]> = {
+  BASS: [9, 8, 6, 4, 2, 0, -2, -3, -4, -4],
+  DRUMS: [5, 4, 3, 2, 0, 0, 2, 3, 4, 3],
+  GUITAR: [-2, -1, 0, 2, 4, 5, 4, 3, 2, 1],
+  VOCALS: [-3, -2, -1, 2, 4, 5, 4, 3, 2, 1],
+  KEYS: [0, 1, 2, 3, 4, 5, 4, 3, 2, 1],
+  SYNTH: [4, 3, 2, 1, 0, 1, 3, 5, 6, 5],
 };
 
-// ===================== STYLES =====================
-
-const ps: React.CSSProperties = {
-  background: "#0d1526",
-  border: "1px solid #1e3a5f",
-  boxShadow: "0 0 15px rgba(0,120,255,0.2)",
-  borderRadius: "6px",
-  padding: "12px",
-  minWidth: 0,
-  boxSizing: "border-box" as const,
+const EQ31_PRESETS: Record<string, number[]> = {
+  Rock: [
+    5, 4, 3, 2, 1, 0, 0, 1, 2, 3, 2, 1, 0, -1, -1, 0, 1, 2, 3, 4, 5, 5, 4, 3, 2,
+    1, 0, 2, 4, 5, 4,
+  ],
+  "Hip-Hop": [
+    8, 7, 6, 5, 4, 3, 2, 1, 0, 0, 1, 2, 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0, 1, 2,
+    3, 4, 4, 3, 2, 1,
+  ],
+  Pop: [
+    2, 2, 1, 1, 0, 1, 2, 3, 4, 4, 3, 2, 1, 1, 2, 3, 3, 2, 1, 1, 2, 3, 3, 2, 1,
+    1, 2, 3, 4, 4, 3,
+  ],
+  Flat: Array(31).fill(0),
 };
 
-const goldText: React.CSSProperties = {
-  color: "#f0c040",
-  textShadow: "0 0 10px #f0c040",
+const FREQ_BAR_KEYS = Array.from({ length: 20 }, (_, i) => `fb${i}`);
+
+const ENGINE_CONFIG = [
+  {
+    name: "LOW PASS",
+    type: "lowpass" as BiquadFilterType,
+    freq: 200,
+    q: 1.2,
+    label: "0 – 200 Hz",
+    cls: "A⁺",
+  },
+  {
+    name: "BAND PASS",
+    type: "bandpass" as BiquadFilterType,
+    freq: 500,
+    q: 1.5,
+    label: "200 – 800 Hz",
+    cls: "B⁺",
+  },
+  {
+    name: "BAND PASS",
+    type: "bandpass" as BiquadFilterType,
+    freq: 3000,
+    q: 1.0,
+    label: "800 Hz – 5 kHz",
+    cls: "C⁺",
+  },
+  {
+    name: "HIGH PASS",
+    type: "highpass" as BiquadFilterType,
+    freq: 2500,
+    q: 0.7,
+    label: "2.5 kHz – 20 kHz",
+    cls: "D⁺",
+  },
+];
+
+// ─── PANEL STYLE ─────────────────────────────────────────────────────────────
+
+const PANEL: React.CSSProperties = {
+  background: "#0d1528",
+  border: "1px solid #1e2e4a",
+  borderRadius: 10,
+  padding: 20,
 };
-const greenText: React.CSSProperties = {
+
+const PANEL_TITLE: React.CSSProperties = {
+  color: "#f5c542",
+  fontSize: 12,
+  fontWeight: 800,
+  letterSpacing: 2,
+  marginBottom: 14,
+  textTransform: "uppercase" as const,
+};
+
+const BTN_GOLD: React.CSSProperties = {
+  background: "linear-gradient(135deg, #1a3a6c 0%, #0d2040 100%)",
+  border: "1px solid #f5c542",
+  color: "#f5c542",
+  padding: "8px 18px",
+  borderRadius: 6,
+  cursor: "pointer",
+  fontWeight: 700,
+  fontSize: 11,
+  letterSpacing: 1,
+};
+
+const BTN_GREEN: React.CSSProperties = {
+  background: "#002a18",
+  border: "1px solid #00ff88",
   color: "#00ff88",
-  textShadow: "0 0 8px #00ff88",
-};
-const dimText: React.CSSProperties = { color: "#4a6fa5", fontSize: "10px" };
-const labelStyle: React.CSSProperties = {
-  color: "#7ab3e0",
-  fontSize: "10px",
-  letterSpacing: "0.1em",
-  marginBottom: "4px",
+  padding: "8px 18px",
+  borderRadius: 6,
+  cursor: "pointer",
+  fontWeight: 700,
+  fontSize: 11,
+  letterSpacing: 1,
 };
 
-// ===================== BOOK ANIMATION =====================
+const BTN_MUTED: React.CSSProperties = {
+  background: "#0f1628",
+  border: "1px solid #1e2e4a",
+  color: "#5a7090",
+  padding: "8px 18px",
+  borderRadius: 6,
+  cursor: "pointer",
+  fontWeight: 700,
+  fontSize: 11,
+  letterSpacing: 1,
+};
 
-function BookAnimation({ onComplete }: { onComplete: () => void }) {
-  const [phase, setPhase] = useState<"closed" | "opening" | "done">("closed");
+// ─── VERTICAL SLIDER ─────────────────────────────────────────────────────────
+// CRITICAL: uses ONLY transform:rotate(-90deg) — NO writing-mode anywhere.
 
-  useEffect(() => {
-    const t1 = setTimeout(() => setPhase("opening"), 300);
-    const t2 = setTimeout(() => {
-      setPhase("done");
-      onComplete();
-    }, 6000);
-    return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-    };
-  }, [onComplete]);
-
-  const opening = phase === "opening";
-  const done = phase === "done";
-
-  if (done) return null;
-
+function VerticalSlider({
+  value,
+  min = -12,
+  max = 12,
+  step = 0.1,
+  onChange,
+  sliderClass = "eq-slider",
+  height = 120,
+  width = 32,
+}: {
+  value: number;
+  min?: number;
+  max?: number;
+  step?: number;
+  onChange: (v: number) => void;
+  sliderClass?: string;
+  height?: number;
+  width?: number;
+}) {
+  // innerOffset centres the rotated (height×width) div inside the (width×height) wrapper
+  const innerOffset = (height - width) / 2;
   return (
     <div
       style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 9998,
-        background: "#020610",
         display: "flex",
+        flexDirection: "column",
         alignItems: "center",
-        justifyContent: "center",
-        perspective: "1200px",
+        height: `${height}px`,
+        width: `${width}px`,
+        position: "relative",
+        flexShrink: 0,
       }}
     >
-      {/* Glow orb */}
       <div
         style={{
+          width: `${height}px`,
+          height: `${width}px`,
+          transform: "rotate(-90deg)",
           position: "absolute",
-          width: 300,
-          height: 300,
-          borderRadius: "50%",
-          background:
-            "radial-gradient(circle, rgba(0,80,200,0.3) 0%, transparent 70%)",
-          filter: "blur(40px)",
-        }}
-      />
-
-      {/* Book container */}
-      <div
-        style={{
-          position: "relative",
-          width: 480,
-          height: 320,
-          transformStyle: "preserve-3d",
+          top: `${innerOffset}px`,
+          left: `${-innerOffset}px`,
         }}
       >
-        {/* Left cover */}
-        <div
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            width: "50%",
-            height: "100%",
-            background:
-              "linear-gradient(135deg, #0a1628 0%, #0d2050 50%, #0a1628 100%)",
-            border: "2px solid #f0c040",
-            borderRight: "none",
-            transformOrigin: "right center",
-            transform: opening ? "rotateY(-150deg)" : "rotateY(0deg)",
-            transition: "transform 5s cubic-bezier(0.25,0.1,0.25,1)",
-            transformStyle: "preserve-3d",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            boxShadow: "-4px 0 20px rgba(240,192,64,0.3)",
-            backfaceVisibility: "hidden",
-          }}
-        >
-          <div style={{ textAlign: "center" }}>
-            <div
-              style={{
-                ...goldText,
-                fontSize: "11px",
-                letterSpacing: "0.3em",
-                marginBottom: 8,
-              }}
-            >
-              POWERSOUND
-            </div>
-            <div style={{ color: "#1e3a5f", fontSize: "28px" }}>◈</div>
-          </div>
-        </div>
-
-        {/* Spine */}
-        <div
-          style={{
-            position: "absolute",
-            top: 0,
-            left: "calc(50% - 3px)",
-            width: 6,
-            height: "100%",
-            background:
-              "linear-gradient(to bottom, #f0c040 0%, #c09000 50%, #f0c040 100%)",
-            boxShadow: "0 0 20px #f0c040, 0 0 40px rgba(240,192,64,0.5)",
-            zIndex: 10,
-          }}
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(Number.parseFloat(e.target.value))}
+          className={sliderClass}
+          style={{ width: "100%", height: "100%", display: "block" }}
         />
-
-        {/* Right cover */}
-        <div
-          style={{
-            position: "absolute",
-            top: 0,
-            right: 0,
-            width: "50%",
-            height: "100%",
-            background:
-              "linear-gradient(225deg, #0a1628 0%, #0d2050 50%, #0a1628 100%)",
-            border: "2px solid #f0c040",
-            borderLeft: "none",
-            transformOrigin: "left center",
-            transform: opening ? "rotateY(150deg)" : "rotateY(0deg)",
-            transition: "transform 5s cubic-bezier(0.25,0.1,0.25,1)",
-            transformStyle: "preserve-3d",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            boxShadow: "4px 0 20px rgba(240,192,64,0.3)",
-            backfaceVisibility: "hidden",
-          }}
-        >
-          <div style={{ textAlign: "center" }}>
-            <div
-              style={{
-                ...goldText,
-                fontSize: "11px",
-                letterSpacing: "0.3em",
-                marginBottom: 8,
-              }}
-            >
-              PRO
-            </div>
-            <div style={{ color: "#1e3a5f", fontSize: "28px" }}>◈</div>
-          </div>
-        </div>
-
-        {/* Inner glow when opening */}
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            background:
-              "radial-gradient(ellipse at center, rgba(0,120,255,0.6) 0%, transparent 60%)",
-            opacity: opening ? 1 : 0,
-            transition: "opacity 2s ease 1s",
-            zIndex: 5,
-          }}
-        />
-
-        {/* Center text */}
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 6,
-            opacity: opening ? 1 : 0,
-            transition: "opacity 2s ease 2s",
-          }}
-        >
-          <div
-            style={{
-              ...goldText,
-              fontSize: "22px",
-              fontWeight: "bold",
-              letterSpacing: "0.15em",
-              marginBottom: 6,
-            }}
-          >
-            POWERSOUND PRO
-          </div>
-          <div
-            style={{
-              color: "#7ab3e0",
-              fontSize: "11px",
-              letterSpacing: "0.4em",
-            }}
-          >
-            LOADING SYSTEM...
-          </div>
-        </div>
-      </div>
-
-      <div
-        style={{
-          position: "absolute",
-          bottom: 60,
-          left: "50%",
-          transform: "translateX(-50%)",
-          color: "#f0c040",
-          fontSize: "11px",
-          letterSpacing: "0.3em",
-          opacity: opening ? 1 : 0,
-          transition: "opacity 1s ease 1.5s",
-        }}
-      >
-        ✦ AWARD WINNING NUMBER 1 AUDIO SYSTEM ✦
       </div>
     </div>
   );
 }
 
-// ===================== SIGNAL BAR =====================
+// ─── AUDIO REFS TYPE ──────────────────────────────────────────────────────────
 
-function SignalBar({ active, level }: { active: boolean; level: number }) {
-  return (
-    <div
-      style={{ display: "flex", gap: 2, alignItems: "flex-end", height: 20 }}
-    >
-      {[0.2, 0.4, 0.6, 0.8, 1.0].map((threshold, i) => (
-        <div
-          key={threshold}
-          style={{
-            width: 6,
-            height: `${(i + 1) * 20}%`,
-            background: active && level > threshold ? "#00ff88" : "#1e3a5f",
-            boxShadow: active && level > threshold ? "0 0 4px #00ff88" : "none",
-            borderRadius: 1,
-            transition: "background 0.1s",
-          }}
-        />
-      ))}
-    </div>
-  );
+interface AudioRefs {
+  ctx: AudioContext | null;
+  source: AudioBufferSourceNode | null;
+  engineFilters: BiquadFilterNode[];
+  engineGains: GainNode[];
+  mixGain: GainNode | null;
+  bass80: BiquadFilterNode | null;
+  eq10: BiquadFilterNode[];
+  eq31: BiquadFilterNode[];
+  compressor: DynamicsCompressorNode | null;
+  shaper1: WaveShaperNode | null;
+  shaper2: WaveShaperNode | null;
+  masterGain: GainNode | null;
+  analyser: AnalyserNode | null;
+  presenceFilter: BiquadFilterNode | null;
+  airFilter: BiquadFilterNode | null;
 }
 
-// ===================== MAIN APP =====================
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
 
 export default function App() {
-  // Load saved memory from localStorage
-  const savedMemory = (() => {
-    try {
-      return JSON.parse(localStorage.getItem("psp_memory") || "{}");
-    } catch {
-      return {};
-    }
-  })();
+  // ── Book animation
+  const [bookOpen, setBookOpen] = useState(false);
 
-  const [animDone, setAnimDone] = useState(false);
+  // ── UI state
+  const [commanderOn, setCommanderOn] = useState(false);
+  const [engineStates, setEngineStates] = useState<boolean[]>([
+    true,
+    true,
+    true,
+    true,
+  ]);
+  const [eq10, setEq10] = useState<number[]>(Array(10).fill(0));
+  const [eq31, setEq31] = useState<number[]>(Array(31).fill(0));
+  const [battery, setBattery] = useState(0);
+  const [isCharging, setIsCharging] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [trackName, setTrackName] = useState("");
-  const [battery, setBattery] = useState(savedMemory.battery ?? 0);
-  const [batteryCharging, setBatteryCharging] = useState(false);
-  const [engines, setEngines] = useState<Engine[]>(
-    savedMemory.engines ?? INITIAL_ENGINES,
-  );
-  const [eq10vals, setEq10vals] = useState<number[]>(
-    savedMemory.eq10vals ?? new Array(10).fill(0),
-  );
-  const [eq31vals, setEq31vals] = useState<number[]>(
-    savedMemory.eq31vals ?? new Array(31).fill(0),
-  );
-  const [selectedInstrument, setSelectedInstrument] = useState<string>("FLAT");
-  const [instrumentMixVals, setInstrumentMixVals] = useState<{
-    [key: string]: number;
-  }>({
-    BASS: 75,
-    DRUMS: 70,
-    GUITAR: 65,
-    VOCALS: 80,
-    KEYS: 60,
-    SYNTH: 65,
-    FLAT: 75,
-  });
-  const [bassOn, setBassOn] = useState(savedMemory.bassOn ?? true);
-  const [commanderOn, setCommanderOn] = useState(
-    savedMemory.commanderOn ?? true,
-  );
-  const [volume1700, setVolume1700] = useState(savedMemory.volume1700 ?? 1700);
-  const [loudBoosterVal, setLoudBoosterVal] = useState(
-    savedMemory.loudBoosterVal ?? 1700,
-  );
-  const [specBars, setSpecBars] = useState<number[]>(new Array(8).fill(0));
-  const [freqProfile, setFreqProfile] = useState("ANALYZING...");
-  const [engineLevels, setEngineLevels] = useState([0, 0, 0, 0]);
+  const [loudBooster, setLoudBooster] = useState(0);
+  const [masterVolume, setMasterVolume] = useState(850);
+  const [bass80On, setBass80On] = useState(false);
+  const [autoGenOn, setAutoGenOn] = useState(false);
+  const [signalLevels, setSignalLevels] = useState<number[]>([0, 0, 0, 0]);
+  const [freqBars, setFreqBars] = useState<number[]>(Array(20).fill(0));
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
+  const [playOffset, setPlayOffset] = useState(0);
+  const [playStartTime, setPlayStartTime] = useState(0);
 
-  const audioRef = useRef<AudioStore>({
+  // ── Audio refs
+  const ar = useRef<AudioRefs>({
     ctx: null,
     source: null,
-    analyser: null,
-    engines: [],
-    compressor: null,
-    outputGain: null,
+    engineFilters: [],
+    engineGains: [],
+    mixGain: null,
+    bass80: null,
     eq10: [],
     eq31: [],
-    bassFilter: null,
-    loudBoosterGain: null,
+    compressor: null,
+    shaper1: null,
+    shaper2: null,
+    masterGain: null,
+    analyser: null,
+    presenceFilter: null,
+    airFilter: null,
   });
-  const chargeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const chargingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const drainTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const animFrameRef = useRef<number | null>(null);
-  const fileRef = useRef<ArrayBuffer | null>(null);
-  const batteryRef = useRef(savedMemory.battery ?? 0);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const autoGenTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // ---- Battery charging ----
-  const startCharging = useCallback(() => {
-    if (chargeTimerRef.current) return;
-    setBatteryCharging(true);
-    chargeTimerRef.current = setInterval(() => {
-      setBattery((prev) => {
-        const next = Math.min(100, prev + 1);
-        batteryRef.current = next;
-        if (next >= 100) {
-          setBatteryCharging(false);
-          if (chargeTimerRef.current) {
-            clearInterval(chargeTimerRef.current);
-            chargeTimerRef.current = null;
-          }
-        }
-        return next;
-      });
-    }, 120);
+  // ── Restore from localStorage
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("psp-state");
+      if (raw) {
+        const s = JSON.parse(raw);
+        if (typeof s.battery === "number") setBattery(s.battery);
+        if (Array.isArray(s.engineStates)) setEngineStates(s.engineStates);
+        if (Array.isArray(s.eq10)) setEq10(s.eq10);
+        if (Array.isArray(s.eq31)) setEq31(s.eq31);
+        if (typeof s.commanderOn === "boolean") setCommanderOn(s.commanderOn);
+        if (typeof s.loudBooster === "number") setLoudBooster(s.loudBooster);
+        if (typeof s.masterVolume === "number") setMasterVolume(s.masterVolume);
+        if (typeof s.bass80On === "boolean") setBass80On(s.bass80On);
+      }
+    } catch (_) {}
+    const t = setTimeout(() => setBookOpen(true), 6300);
+    return () => clearTimeout(t);
   }, []);
 
-  // Save all app state to memory
+  // ── Persist to localStorage
   useEffect(() => {
     try {
       localStorage.setItem(
-        "psp_memory",
+        "psp-state",
         JSON.stringify({
           battery,
-          engines,
-          eq10vals,
-          eq31vals,
-          bassOn,
+          engineStates,
+          eq10,
+          eq31,
           commanderOn,
-          volume1700,
-          loudBoosterVal,
+          loudBooster,
+          masterVolume,
+          bass80On,
         }),
       );
     } catch (_) {}
   }, [
     battery,
-    engines,
-    eq10vals,
-    eq31vals,
-    bassOn,
+    engineStates,
+    eq10,
+    eq31,
     commanderOn,
-    volume1700,
-    loudBoosterVal,
+    loudBooster,
+    masterVolume,
+    bass80On,
   ]);
 
+  // ── Battery charge timer
   useEffect(() => {
-    startCharging();
-    return () => {
-      if (chargeTimerRef.current) clearInterval(chargeTimerRef.current);
-    };
-  }, [startCharging]);
-
-  // ---- Analyser loop ----
-  const startAnalyser = useCallback(() => {
-    const { analyser } = audioRef.current;
-    if (!analyser) return;
-    const data = new Uint8Array(analyser.frequencyBinCount);
-
-    const loop = () => {
-      analyser.getByteFrequencyData(data);
-      const binSize = Math.floor(data.length / 8);
-      const bars = Array.from({ length: 8 }, (_, i) => {
-        const start = i * binSize;
-        const slice = data.slice(start, start + binSize);
-        const avg = slice.reduce((a, b) => a + b, 0) / slice.length;
-        return avg / 255;
+    if (chargingTimerRef.current) clearInterval(chargingTimerRef.current);
+    if (!isCharging) return;
+    chargingTimerRef.current = setInterval(() => {
+      setBattery((prev) => {
+        if (prev >= 100) {
+          setIsCharging(false);
+          return 100;
+        }
+        return prev + 1;
       });
-      setSpecBars(bars);
+    }, 400);
+    return () => {
+      if (chargingTimerRef.current) clearInterval(chargingTimerRef.current);
+    };
+  }, [isCharging]);
 
-      // Engine levels
-      const bassAvg = data.slice(0, 20).reduce((a, b) => a + b, 0) / 20 / 255;
-      const lo = data.slice(0, 40).reduce((a, b) => a + b, 0) / 40 / 255;
-      const midLo = data.slice(40, 100).reduce((a, b) => a + b, 0) / 60 / 255;
-      const midHi = data.slice(100, 200).reduce((a, b) => a + b, 0) / 100 / 255;
-      const hiAvg =
-        data.slice(200).reduce((a, b) => a + b, 0) / (data.length - 200) / 255;
-      setEngineLevels([lo, midLo, midHi, hiAvg]);
-
-      // Profile detection every ~500ms - handled by rAF rate
-      const total = data.reduce((a, b) => a + b, 0) / data.length;
-      if (total > 5) {
-        if (bassAvg > hiAvg * 1.5) setFreqProfile("BASS HEAVY");
-        else if (hiAvg > bassAvg * 1.5) setFreqProfile("BRIGHT / AIRY");
-        else setFreqProfile("MID FOCUSED");
-      } else {
-        setFreqProfile("ANALYZING...");
-      }
-
+  // ── Analyser loop
+  const startAnalyser = useCallback(() => {
+    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    const loop = () => {
+      const analyser = ar.current.analyser;
+      if (!analyser) return;
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(data);
+      const bars = Array(20)
+        .fill(0)
+        .map((_, i) => {
+          const s = Math.floor((i / 20) * data.length);
+          const e = Math.floor(((i + 1) / 20) * data.length);
+          let sum = 0;
+          for (let j = s; j < e; j++) sum += data[j];
+          return sum / Math.max(1, e - s) / 255;
+        });
+      setFreqBars(bars);
+      setSignalLevels([
+        (data[1] ?? 0) / 255,
+        (data[6] ?? 0) / 255,
+        (data[18] ?? 0) / 255,
+        (data[35] ?? 0) / 255,
+      ]);
       animFrameRef.current = requestAnimationFrame(loop);
     };
     animFrameRef.current = requestAnimationFrame(loop);
   }, []);
 
-  // ---- Build audio graph ----
-  const buildGraph = useCallback(
-    (buffer: AudioBuffer) => {
-      const store = audioRef.current;
-      if (store.source) {
-        try {
-          store.source.stop();
-        } catch (_) {}
-      }
-      if (store.ctx) {
-        store.ctx.close();
-      }
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+  // ── Auto frequency generator (TRULY REAL — analyzes full spectrum, adapts both EQs)
+  useEffect(() => {
+    if (autoGenTimerRef.current) clearInterval(autoGenTimerRef.current);
+    if (!autoGenOn || !isPlaying) return;
+    autoGenTimerRef.current = setInterval(() => {
+      const analyser = ar.current.analyser;
+      if (!analyser) return;
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(data);
+      const nyquist = 20000;
+      const binCount = data.length;
 
-      const ctx = new AudioContext();
+      // Helper: get average energy across a frequency range
+      const getBandEnergy = (freqLow: number, freqHigh: number) => {
+        const lo = Math.max(0, Math.floor((freqLow / nyquist) * binCount));
+        const hi = Math.min(
+          binCount - 1,
+          Math.ceil((freqHigh / nyquist) * binCount),
+        );
+        if (hi <= lo) return (data[lo] ?? 0) / 255;
+        let sum = 0;
+        for (let j = lo; j <= hi; j++) sum += data[j] ?? 0;
+        return sum / (hi - lo + 1) / 255;
+      };
 
-      // Output gain (1700 slider: 0-1, never above unity)
-      const outputGain = ctx.createGain();
-      outputGain.gain.value = volume1700 / 1700;
+      // Update 10-band EQ
+      setEq10((prev) =>
+        prev.map((val, i) => {
+          const freq = EQ10_FREQS[i];
+          const halfOctave = freq * 0.29; // ~half octave each side
+          const level = getBandEnergy(freq - halfOctave, freq + halfOctave);
+          // Too much energy → pull down (prevent distortion); too little → push up (presence)
+          let nudge = 0;
+          if (level > 0.7)
+            nudge = -(level - 0.7) * 1.2; // pull down
+          else if (level < 0.3) nudge = (0.3 - level) * 0.8; // push up gently
+          nudge = Math.max(-0.8, Math.min(0.8, nudge));
+          const next = Math.max(-10, Math.min(10, val + nudge));
+          const f = ar.current.eq10[i];
+          if (f) f.gain.value = next;
+          return next;
+        }),
+      );
 
-      // Loud Booster gain node (0-1700 mapped to 0-1)
-      const loudBoosterGain = ctx.createGain();
-      loudBoosterGain.gain.value = loudBoosterVal / 1700;
+      // Update 31-band EQ
+      setEq31((prev) =>
+        prev.map((val, i) => {
+          const freq = EQ31_FREQS[i];
+          const halfOctave = freq * 0.18; // ~1/3 octave bands
+          const level = getBandEnergy(freq - halfOctave, freq + halfOctave);
+          let nudge = 0;
+          if (level > 0.7) nudge = -(level - 0.7) * 1.0;
+          else if (level < 0.3) nudge = (0.3 - level) * 0.6;
+          nudge = Math.max(-0.8, Math.min(0.8, nudge));
+          const next = Math.max(-10, Math.min(10, val + nudge));
+          const f = ar.current.eq31[i];
+          if (f) f.gain.value = next;
+          return next;
+        }),
+      );
 
-      // Stabilizer (very gentle dynamics compressor)
-      const compressor = ctx.createDynamicsCompressor();
-      compressor.threshold.value = -1;
-      compressor.knee.value = 40;
-      compressor.ratio.value = 1.1;
-      compressor.attack.value = 0;
-      compressor.release.value = 0.25;
+      // Adaptive engine Q values based on signal content
+      const bassEnergy = getBandEnergy(20, 200);
+      const midEnergy = getBandEnergy(200, 3000);
+      const highEnergy = getBandEnergy(3000, 20000);
+      const filters = ar.current.engineFilters;
+      if (filters[0]) filters[0].Q.value = 1.2 + bassEnergy * 0.3; // lowpass: tighter with more bass
+      if (filters[1]) filters[1].Q.value = 1.5 + midEnergy * 0.5; // bandpass mid-low
+      if (filters[2]) filters[2].Q.value = 1.8 + midEnergy * 0.4; // bandpass mid-high
+      if (filters[3]) filters[3].Q.value = 1.2 + highEnergy * 0.5; // highpass
+    }, 500);
+    return () => {
+      if (autoGenTimerRef.current) clearInterval(autoGenTimerRef.current);
+    };
+  }, [autoGenOn, isPlaying]);
 
-      // 80Hz bass filter (lowshelf, no gain by default)
-      const bassFilter = ctx.createBiquadFilter();
-      bassFilter.type = "lowshelf";
-      bassFilter.frequency.value = 80;
-      bassFilter.gain.value = bassOn ? 3 : 0; // modest 3dB warm shelf
-
-      // 10-band EQ (series)
-      const eq10: BiquadFilterNode[] = EQ10_BANDS.map((freq, i) => {
-        const f = ctx.createBiquadFilter();
-        f.type = i === 0 ? "lowshelf" : i === 9 ? "highshelf" : "peaking";
-        f.frequency.value = freq;
-        f.Q.value = 1.41;
-        f.gain.value = eq10vals[i];
-        return f;
-      });
-
-      // 31-band EQ (series)
-      const eq31: BiquadFilterNode[] = EQ31_BANDS.map((freq, i) => {
-        const f = ctx.createBiquadFilter();
-        f.type = i === 0 ? "lowshelf" : i === 30 ? "highshelf" : "peaking";
-        f.frequency.value = freq;
-        f.Q.value = 4.32; // narrow bands
-        f.gain.value = eq31vals[i];
-        return f;
-      });
-
-      // Analyser
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 1024;
-      analyser.smoothingTimeConstant = 0.7;
-
-      // Engine filters
-      const engineFilters: BiquadFilterNode[] = INITIAL_ENGINES.map((e) => {
-        const f = ctx.createBiquadFilter();
-        f.type = e.type;
-        f.frequency.value = e.frequency;
-        // Wide Q for bandpass = more frequencies pass through = strong signal
-        f.Q.value = e.type === "bandpass" ? 0.4 : 0.8;
-        return f;
-      });
+  // ── Build audio chain (called on every Play)
+  const buildChain = useCallback(
+    (
+      ctx: AudioContext,
+      buf: AudioBuffer,
+      engStates: boolean[],
+      eq10vals: number[],
+      eq31vals: number[],
+      vol: number,
+    ) => {
+      const r = ar.current;
 
       // Source
       const source = ctx.createBufferSource();
-      source.buffer = buffer;
+      source.buffer = buf;
 
-      // Signal chain:
-      // source -> analyser -> bassFilter -> eq10[chain] -> eq31[chain]
-      //        -> each active engine filter -> compressor -> outputGain -> destination
-      source.connect(analyser);
-      analyser.connect(bassFilter);
-      bassFilter.connect(eq10[0]);
-      for (let i = 0; i < eq10.length - 1; i++) eq10[i].connect(eq10[i + 1]);
-      const lastEq10 = eq10[eq10.length - 1];
-      lastEq10.connect(eq31[0]);
-      for (let i = 0; i < eq31.length - 1; i++) eq31[i].connect(eq31[i + 1]);
-      const lastEq31 = eq31[eq31.length - 1];
+      // 4 parallel engine filters → engineGains → mixGain
+      r.engineFilters = [];
+      r.engineGains = [];
+      const mixGain = ctx.createGain();
+      mixGain.gain.value = 0.25; // merge 4 parallel outputs
+      r.mixGain = mixGain;
 
-      // Each engine connects in parallel from end of EQ chain -> compressor
-      engineFilters.forEach((ef, i) => {
-        if (engines[i]?.on !== false) {
-          lastEq31.connect(ef);
-          ef.connect(compressor);
+      // Sub-bass cut — removes rumble below 40Hz that causes mud and distortion
+      const subCut = ctx.createBiquadFilter();
+      subCut.type = "highpass";
+      subCut.frequency.value = 40;
+      subCut.Q.value = 0.5;
+      source.connect(subCut);
+
+      for (let i = 0; i < 4; i++) {
+        const cfg = ENGINE_CONFIG[i];
+        const filter = ctx.createBiquadFilter();
+        filter.type = cfg.type;
+        filter.frequency.value = cfg.freq;
+        if (cfg.q) filter.Q.value = cfg.q;
+        const gn = ctx.createGain();
+        gn.gain.value = engStates[i] ? 1 : 0;
+        subCut.connect(filter);
+        filter.connect(gn);
+        gn.connect(mixGain);
+        r.engineFilters.push(filter);
+        r.engineGains.push(gn);
+      }
+
+      // 80 Hz low-shelf
+      const bass80 = ctx.createBiquadFilter();
+      bass80.type = "lowshelf";
+      bass80.frequency.value = 80;
+      bass80.gain.value = 0;
+      r.bass80 = bass80;
+      mixGain.connect(bass80);
+
+      // 10-band EQ (series)
+      r.eq10 = [];
+      let prev: AudioNode = bass80;
+      for (let i = 0; i < 10; i++) {
+        const f = ctx.createBiquadFilter();
+        f.type = "peaking";
+        f.frequency.value = EQ10_FREQS[i];
+        f.Q.value = 1.4;
+        f.gain.value = eq10vals[i];
+        prev.connect(f);
+        prev = f;
+        r.eq10.push(f);
+      }
+
+      // 31-band EQ (series)
+      r.eq31 = [];
+      for (let i = 0; i < 31; i++) {
+        const f = ctx.createBiquadFilter();
+        f.type = "peaking";
+        f.frequency.value = EQ31_FREQS[i];
+        f.Q.value = 2.8;
+        f.gain.value = eq31vals[i];
+        prev.connect(f);
+        prev = f;
+        r.eq31.push(f);
+      }
+
+      // PROCESSOR: presenceFilter + airFilter (SRS 22 Chip real audio processing)
+      const presenceFilter = ctx.createBiquadFilter();
+      presenceFilter.type = "peaking";
+      presenceFilter.frequency.value = 3000;
+      presenceFilter.gain.value = 2.0; // +2dB presence/clarity
+      presenceFilter.Q.value = 1.5;
+      prev.connect(presenceFilter);
+      r.presenceFilter = presenceFilter;
+
+      const airFilter = ctx.createBiquadFilter();
+      airFilter.type = "highshelf";
+      airFilter.frequency.value = 10000;
+      airFilter.gain.value = 1.5; // +1.5dB air/sparkle
+      presenceFilter.connect(airFilter);
+      r.airFilter = airFilter;
+      prev = airFilter;
+
+      // Compressor (Loud Booster — signal shaper, no gain multiplication)
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -6; // only kicks in near clipping
+      comp.knee.value = 3; // tight knee, no soft zone
+      comp.ratio.value = 20; // near brick-wall limiting
+      comp.attack.value = 0.001; // very fast attack to catch transients
+      comp.release.value = 0.1; // quick release for punchy rock sound
+      r.compressor = comp;
+      prev.connect(comp);
+
+      // Stabilizer — clean brick-wall limiter, zero harmonic distortion in normal range
+      const makeCleanLimiter = () => {
+        const n = 4096;
+        const curve = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+          const x = (i * 2) / n - 1;
+          // Hard clip only at +/-0.98, completely linear below that
+          curve[i] = Math.max(-0.98, Math.min(0.98, x));
         }
-      });
-      // If all engines off, connect directly
-      const anyOn = engines.some((e) => e.on);
-      if (!anyOn) lastEq31.connect(compressor);
+        return curve;
+      };
+      const s1 = ctx.createWaveShaper();
+      s1.curve = makeCleanLimiter();
+      s1.oversample = "4x";
+      r.shaper1 = s1;
+      comp.connect(s1);
+      const s2 = ctx.createWaveShaper();
+      s2.curve = makeCleanLimiter();
+      s2.oversample = "4x";
+      r.shaper2 = s2;
+      s1.connect(s2);
 
-      compressor.connect(loudBoosterGain);
-      loudBoosterGain.connect(outputGain);
-      outputGain.connect(ctx.destination);
+      // Master gain (0–1, slider labeled 0–1700)
+      const mg = ctx.createGain();
+      mg.gain.value = vol / 1700;
+      r.masterGain = mg;
+      s2.connect(mg);
 
-      source.start();
-      source.onended = () => setIsPlaying(false);
+      // Analyser
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      r.analyser = analyser;
+      mg.connect(analyser);
+      mg.connect(ctx.destination);
 
-      Object.assign(store, {
-        ctx,
-        source,
-        analyser,
-        engines: engineFilters,
-        compressor,
-        outputGain,
-        eq10,
-        eq31,
-        bassFilter,
-        loudBoosterGain,
-      });
-      startAnalyser();
+      return source;
     },
-    [
-      bassOn,
-      eq10vals,
-      eq31vals,
-      engines,
-      volume1700,
-      loudBoosterVal,
-      startAnalyser,
-    ],
+    [],
   );
 
-  // ---- Update output gain when slider changes ----
-  useEffect(() => {
-    const { outputGain } = audioRef.current;
-    if (outputGain) outputGain.gain.value = volume1700 / 1700;
-  }, [volume1700]);
-
-  // ---- Update loud booster gain in real time ----
-  useEffect(() => {
-    const { loudBoosterGain } = audioRef.current;
-    if (loudBoosterGain) loudBoosterGain.gain.value = loudBoosterVal / 1700;
-  }, [loudBoosterVal]);
-
-  // ---- Update EQ nodes in real time ----
-  useEffect(() => {
-    audioRef.current.eq10.forEach((node, i) => {
-      node.gain.value = eq10vals[i];
-    });
-  }, [eq10vals]);
-
-  useEffect(() => {
-    audioRef.current.eq31.forEach((node, i) => {
-      node.gain.value = eq31vals[i];
-    });
-  }, [eq31vals]);
-
-  // ---- File picker ----
-  const handleFile = useCallback(async (file: File) => {
-    const ab = await file.arrayBuffer();
-    fileRef.current = ab;
-    setTrackName(file.name.replace(/\.[^/.]+$/, ""));
-    setIsPlaying(false);
-    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    const store = audioRef.current;
-    if (store.source) {
-      try {
-        store.source.stop();
-      } catch (_) {}
-    }
-  }, []);
-
-  const handlePlay = useCallback(async () => {
-    if (!fileRef.current) return;
-    if (batteryRef.current <= 0) return;
-    const store = audioRef.current;
-    if (store.ctx?.state === "running" && store.source) {
-      // already playing, stop
-      try {
-        store.source.stop();
-      } catch (_) {}
+  // ── File load
+  const handleFileLoad = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const r = ar.current;
+      // Tear down existing
+      if (r.source) {
+        try {
+          r.source.stop();
+        } catch (_) {}
+        r.source = null;
+      }
+      if (r.ctx) {
+        try {
+          await r.ctx.close();
+        } catch (_) {}
+        r.ctx = null;
+      }
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
+      }
+      if (drainTimerRef.current) {
+        clearInterval(drainTimerRef.current);
+        drainTimerRef.current = null;
+      }
       setIsPlaying(false);
-      return;
-    }
-    const tempCtx = new AudioContext();
-    const buffer = await tempCtx.decodeAudioData(fileRef.current.slice(0));
-    await tempCtx.close();
-    buildGraph(buffer);
-    setIsPlaying(true);
-  }, [buildGraph]);
+      setPlayOffset(0);
+      setFileName(file.name);
+      setFreqBars(Array(20).fill(0));
+      setSignalLevels([0, 0, 0, 0]);
 
-  const handleStop = useCallback(() => {
-    const store = audioRef.current;
-    if (store.source) {
+      const arrayBuf = await file.arrayBuffer();
+      const ctx = new AudioContext();
+      const buf = await ctx.decodeAudioData(arrayBuf);
+      ar.current.ctx = ctx;
+      setAudioBuffer(buf);
+      e.target.value = "";
+    },
+    [],
+  );
+
+  // ── Play
+  const handlePlay = useCallback(() => {
+    const r = ar.current;
+    if (!audioBuffer || !r.ctx) return;
+    if (battery <= 0) return;
+    if (r.source) {
       try {
-        store.source.stop();
+        r.source.stop();
       } catch (_) {}
+      r.source = null;
     }
-    setIsPlaying(false);
-    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    setSpecBars(new Array(8).fill(0));
-    setEngineLevels([0, 0, 0, 0]);
-  }, []);
-
-  const handlePause = useCallback(() => {
-    const { ctx } = audioRef.current;
-    if (!ctx) return;
-    if (ctx.state === "running") {
-      ctx.suspend();
-      setIsPlaying(false);
-    } else if (ctx.state === "suspended") {
-      ctx.resume();
-      setIsPlaying(true);
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
     }
-  }, []);
+    if (drainTimerRef.current) {
+      clearInterval(drainTimerRef.current);
+      drainTimerRef.current = null;
+    }
 
-  // ---- Toggle engine ----
-  const toggleEngine = (id: number) => {
-    setEngines((prev) =>
-      prev.map((e) => (e.id === id ? { ...e, on: !e.on } : e)),
+    const source = buildChain(
+      r.ctx,
+      audioBuffer,
+      engineStates,
+      eq10,
+      eq31,
+      masterVolume,
     );
-  };
+    source.start(0, playOffset);
+    r.source = source;
+    setPlayStartTime(r.ctx.currentTime - playOffset);
+    setIsPlaying(true);
+    startAnalyser();
 
-  // ---- 31-band presets ----
-  const applyPreset31 = (preset: number[]) => setEq31vals([...preset]);
+    source.onended = () => {
+      setIsPlaying(false);
+      setPlayOffset(0);
+      setFreqBars(Array(20).fill(0));
+      setSignalLevels([0, 0, 0, 0]);
+      if (drainTimerRef.current) clearInterval(drainTimerRef.current);
+    };
 
-  // ---- Battery drain while playing ----
-  useEffect(() => {
-    if (!isPlaying) return;
-    const t = setInterval(() => {
+    // Battery drain
+    drainTimerRef.current = setInterval(() => {
       setBattery((prev) => {
-        const next = Math.max(0, prev - 0.5);
-        batteryRef.current = next;
-        if (next <= 0) handleStop();
-        return next;
+        if (prev <= 0) {
+          if (r.source) {
+            try {
+              r.source.stop();
+            } catch (_) {}
+            r.source = null;
+          }
+          return 0;
+        }
+        return prev - 0.3;
       });
-    }, 3000);
-    return () => clearInterval(t);
-  }, [isPlaying, handleStop]);
+    }, 1000);
+  }, [
+    audioBuffer,
+    battery,
+    buildChain,
+    engineStates,
+    eq10,
+    eq31,
+    masterVolume,
+    playOffset,
+    startAnalyser,
+  ]);
 
-  const commanderColor = commanderOn ? "#00ff88" : "#1e3a5f";
+  // ── Pause
+  const handlePause = useCallback(() => {
+    const r = ar.current;
+    if (!r.ctx || !r.source) return;
+    const elapsed = r.ctx.currentTime - playStartTime;
+    setPlayOffset(Math.min(elapsed, audioBuffer?.duration ?? elapsed));
+    try {
+      r.source.stop();
+    } catch (_) {}
+    r.source = null;
+    setIsPlaying(false);
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
+    if (drainTimerRef.current) {
+      clearInterval(drainTimerRef.current);
+      drainTimerRef.current = null;
+    }
+    setFreqBars(Array(20).fill(0));
+    setSignalLevels([0, 0, 0, 0]);
+  }, [audioBuffer, playStartTime]);
+
+  // ── Stop
+  const handleStop = useCallback(() => {
+    const r = ar.current;
+    if (r.source) {
+      try {
+        r.source.stop();
+      } catch (_) {}
+      r.source = null;
+    }
+    setIsPlaying(false);
+    setPlayOffset(0);
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
+    if (drainTimerRef.current) {
+      clearInterval(drainTimerRef.current);
+      drainTimerRef.current = null;
+    }
+    setFreqBars(Array(20).fill(0));
+    setSignalLevels([0, 0, 0, 0]);
+  }, []);
+
+  // ── Engine toggle
+  const toggleEngine = useCallback((idx: number) => {
+    setEngineStates((prev) => {
+      const next = [...prev];
+      next[idx] = !next[idx];
+      const g = ar.current.engineGains[idx];
+      if (g) g.gain.value = next[idx] ? 1 : 0;
+      return next;
+    });
+  }, []);
+
+  // ── EQ updates
+  const updateEq10 = useCallback((idx: number, val: number) => {
+    setEq10((prev) => {
+      const next = [...prev];
+      next[idx] = val;
+      const f = ar.current.eq10[idx];
+      if (f) f.gain.value = val;
+      return next;
+    });
+  }, []);
+
+  const updateEq31 = useCallback((idx: number, val: number) => {
+    setEq31((prev) => {
+      const next = [...prev];
+      next[idx] = val;
+      const f = ar.current.eq31[idx];
+      if (f) f.gain.value = val;
+      return next;
+    });
+  }, []);
+
+  const flattenEq10 = useCallback(() => {
+    const flat = Array(10).fill(0);
+    setEq10(flat);
+    flat.forEach((v, i) => {
+      const f = ar.current.eq10[i];
+      if (f) f.gain.value = v;
+    });
+  }, []);
+
+  const applyInstrument = useCallback((name: string) => {
+    const preset = INSTRUMENT_PRESETS[name];
+    if (!preset) return;
+    setEq10([...preset]);
+    preset.forEach((v, i) => {
+      const f = ar.current.eq10[i];
+      if (f) f.gain.value = v;
+    });
+  }, []);
+
+  const applyEq31Preset = useCallback((name: string) => {
+    const preset = EQ31_PRESETS[name];
+    if (!preset) return;
+    setEq31([...preset]);
+    preset.forEach((v, i) => {
+      const f = ar.current.eq31[i];
+      if (f) f.gain.value = v;
+    });
+  }, []);
+
+  // ── Master volume
+  const updateMasterVolume = useCallback((val: number) => {
+    setMasterVolume(val);
+    const mg = ar.current.masterGain;
+    if (mg) mg.gain.value = val / 1700;
+  }, []);
+
+  // ── Loud booster
+  const updateLoudBooster = useCallback((val: number) => {
+    setLoudBooster(val);
+    const comp = ar.current.compressor;
+    if (comp) {
+      const n = val / 1700;
+      comp.threshold.value = -24 + n * 12;
+      comp.ratio.value = 4 + n * 8;
+    }
+  }, []);
+
+  // ── 80Hz bass
+  const toggleBass80 = useCallback(() => {
+    setBass80On((prev) => {
+      const next = !prev;
+      const f = ar.current.bass80;
+      if (f) f.gain.value = next ? 5 : 0;
+      return next;
+    });
+  }, []);
+
+  // ── Cleanup
+  useEffect(() => {
+    return () => {
+      const r = ar.current;
+      if (r.source) {
+        try {
+          r.source.stop();
+        } catch (_) {}
+      }
+      if (r.ctx) {
+        try {
+          r.ctx.close();
+        } catch (_) {}
+      }
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      if (drainTimerRef.current) clearInterval(drainTimerRef.current);
+      if (chargingTimerRef.current) clearInterval(chargingTimerRef.current);
+      if (autoGenTimerRef.current) clearInterval(autoGenTimerRef.current);
+    };
+  }, []);
+
+  // ── Derived
   const batteryColor =
-    battery > 50 ? "#00ff88" : battery > 20 ? "#f0c040" : "#ff4444";
+    battery > 50 ? "#00ff88" : battery > 20 ? "#f5c542" : "#ff5533";
+  const green = (on: boolean) => (on ? "#00ff88" : "#1e2e4a");
+  const greenText = (on: boolean) => (on ? "#00ff88" : "#5a7090");
 
-  if (!animDone) {
-    return <BookAnimation onComplete={() => setAnimDone(true)} />;
-  }
-
+  // ─── RENDER ──────────────────────────────────────────────────────────────────
   return (
     <div
       style={{
+        background: "#080d18",
         minHeight: "100vh",
-        background: "#0a0f1e",
-        color: "#c8e0ff",
-        fontFamily: "'JetBrains Mono', monospace",
-        boxSizing: "border-box",
+        fontFamily: "'Satoshi', sans-serif",
+        color: "#e8edf5",
         overflowX: "hidden",
       }}
     >
+      {/* ── Book Opening Animation ── */}
+      <AnimatePresence>
+        {!bookOpen && (
+          <>
+            {/* Left cover */}
+            <motion.div
+              key="book-left"
+              initial={{ rotateY: 0 }}
+              animate={{ rotateY: -95 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 6, ease: [0.4, 0.0, 0.2, 1] }}
+              style={{
+                position: "fixed",
+                top: 0,
+                left: 0,
+                width: "50vw",
+                height: "100vh",
+                background:
+                  "linear-gradient(160deg, #0e1830 0%, #1a2d50 50%, #0a0e1a 100%)",
+                zIndex: 9999,
+                transformOrigin: "left center",
+                transformStyle: "preserve-3d",
+                borderRight: "3px solid #f5c542",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                perspective: 1200,
+              }}
+            >
+              <div style={{ textAlign: "center" }}>
+                <div
+                  style={{
+                    fontSize: 56,
+                    fontWeight: 900,
+                    color: "#f5c542",
+                    letterSpacing: 4,
+                    textShadow: "0 0 30px rgba(245,197,66,0.7)",
+                  }}
+                >
+                  POWER
+                </div>
+                <div
+                  style={{
+                    fontSize: 16,
+                    color: "#8aa0c0",
+                    letterSpacing: 10,
+                    marginTop: 4,
+                  }}
+                >
+                  SOUND
+                </div>
+              </div>
+            </motion.div>
+            {/* Right cover */}
+            <motion.div
+              key="book-right"
+              initial={{ rotateY: 0 }}
+              animate={{ rotateY: 95 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 6, ease: [0.4, 0.0, 0.2, 1] }}
+              style={{
+                position: "fixed",
+                top: 0,
+                right: 0,
+                width: "50vw",
+                height: "100vh",
+                background:
+                  "linear-gradient(200deg, #0a0e1a 0%, #1a2d50 50%, #0e1830 100%)",
+                zIndex: 9999,
+                transformOrigin: "right center",
+                transformStyle: "preserve-3d",
+                borderLeft: "3px solid #f5c542",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                perspective: 1200,
+              }}
+            >
+              <div style={{ textAlign: "center" }}>
+                <div
+                  style={{
+                    fontSize: 56,
+                    fontWeight: 900,
+                    color: "#f5c542",
+                    letterSpacing: 4,
+                    textShadow: "0 0 30px rgba(245,197,66,0.7)",
+                  }}
+                >
+                  PRO
+                </div>
+                <div
+                  style={{
+                    fontSize: 16,
+                    color: "#8aa0c0",
+                    letterSpacing: 10,
+                    marginTop: 4,
+                  }}
+                >
+                  AUDIO
+                </div>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* ── Main Content ── */}
       <div
-        style={{
-          maxWidth: 1400,
-          margin: "0 auto",
-          padding: "16px",
-          boxSizing: "border-box",
-          display: "flex",
-          flexDirection: "column",
-          gap: 12,
-        }}
+        style={{ maxWidth: 1380, margin: "0 auto", padding: "20px 16px 40px" }}
       >
-        {/* ===== HEADER ===== */}
-        <div
+        {/* ── Header ── */}
+        <header
           style={{
-            ...ps,
             textAlign: "center",
-            padding: "20px 16px",
+            padding: "28px 0 32px",
+            borderBottom: "2px solid #1e3060",
+            marginBottom: 28,
           }}
         >
           <div
             style={{
-              ...goldText,
-              fontSize: 28,
-              fontWeight: "bold",
-              letterSpacing: "0.2em",
-              marginBottom: 6,
+              fontFamily: "'Bricolage Grotesque', sans-serif",
+              fontSize: 52,
+              fontWeight: 900,
+              letterSpacing: 5,
+              color: "#f5c542",
+              textShadow:
+                "0 0 24px rgba(245,197,66,0.5), 0 2px 8px rgba(0,0,0,0.8)",
             }}
           >
-            ⚡ POWERSOUND PRO ⚡
+            PowerSound Pro
           </div>
           <div
             style={{
-              ...goldText,
-              fontSize: 11,
-              letterSpacing: "0.5em",
-              marginBottom: 12,
-              opacity: 0.85,
-            }}
-          >
-            ✦ AWARD WINNING NUMBER 1 AUDIO SYSTEM ✦
-          </div>
-          <div style={{ display: "flex", justifyContent: "center", gap: 16 }}>
-            {["A⁺", "B⁺", "C⁺", "D⁺"].map((cls) => (
-              <span
-                key={cls}
-                style={{
-                  color: "#f0c040",
-                  textShadow: "0 0 12px #f0c040, 0 0 24px rgba(240,192,64,0.5)",
-                  fontSize: 16,
-                  fontWeight: "bold",
-                  background: "rgba(240,192,64,0.08)",
-                  border: "1px solid rgba(240,192,64,0.3)",
-                  borderRadius: 4,
-                  padding: "2px 10px",
-                }}
-              >
-                {cls}
-              </span>
-            ))}
-          </div>
-          <div
-            style={{
-              marginTop: 8,
-              color: "#4a6fa5",
-              fontSize: 10,
-              letterSpacing: "0.2em",
-            }}
-          >
-            HIGH-CLASS AUDIO · SRS 22 CHIP · TITANIUM STABILIZER · CHAIN BLOCK
-          </div>
-        </div>
-
-        {/* ===== ROW: PLAYER + BATTERY ===== */}
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-          {/* Player */}
-          <div style={{ ...ps, flex: "1 1 300px" }}>
-            <div style={{ ...labelStyle }}>MUSIC PLAYER</div>
-            <div style={{ marginBottom: 10 }}>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="audio/*"
-                style={{ display: "none" }}
-                onChange={(e) => {
-                  if (e.target.files?.[0]) handleFile(e.target.files[0]);
-                }}
-              />
-              <button
-                type="button"
-                data-ocid="player.upload_button"
-                onClick={() => fileInputRef.current?.click()}
-                style={{
-                  background: "#0d2050",
-                  border: "1px solid #1e5fa5",
-                  color: "#7ab3e0",
-                  padding: "8px 16px",
-                  borderRadius: 4,
-                  cursor: "pointer",
-                  fontSize: 11,
-                  letterSpacing: "0.1em",
-                  width: "100%",
-                  marginBottom: 8,
-                }}
-              >
-                📂 LOAD MUSIC FILE
-              </button>
-            </div>
-            <div
-              style={{
-                background: "#060c18",
-                border: "1px solid #1e3a5f",
-                borderRadius: 4,
-                padding: "8px 10px",
-                marginBottom: 10,
-                fontSize: 11,
-                color: trackName ? "#7ab3e0" : "#2a4a6f",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {trackName || "NO TRACK LOADED"}
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button
-                type="button"
-                data-ocid="player.primary_button"
-                onClick={handlePlay}
-                style={{
-                  flex: 1,
-                  background: isPlaying ? "#002a10" : "#001a40",
-                  border: `1px solid ${isPlaying ? "#00ff88" : "#1e5fa5"}`,
-                  color: isPlaying ? "#00ff88" : "#7ab3e0",
-                  padding: "8px",
-                  borderRadius: 4,
-                  cursor: "pointer",
-                  fontSize: 11,
-                  boxShadow: isPlaying
-                    ? "0 0 10px rgba(0,255,136,0.3)"
-                    : "none",
-                }}
-              >
-                {isPlaying ? "⏸ PAUSE" : "▶ PLAY"}
-              </button>
-              <button
-                type="button"
-                data-ocid="player.secondary_button"
-                onClick={handlePause}
-                style={{
-                  flex: 1,
-                  background: "#001a40",
-                  border: "1px solid #1e5fa5",
-                  color: "#7ab3e0",
-                  padding: "8px",
-                  borderRadius: 4,
-                  cursor: "pointer",
-                  fontSize: 11,
-                }}
-              >
-                ⏯ PAUSE/RESUME
-              </button>
-              <button
-                type="button"
-                data-ocid="player.delete_button"
-                onClick={handleStop}
-                style={{
-                  flex: 1,
-                  background: "#200010",
-                  border: "1px solid #3f1020",
-                  color: "#ff6680",
-                  padding: "8px",
-                  borderRadius: 4,
-                  cursor: "pointer",
-                  fontSize: 11,
-                }}
-              >
-                ⏹ STOP
-              </button>
-            </div>
-          </div>
-
-          {/* Battery */}
-          <div style={{ ...ps, width: 200, flexShrink: 0 }}>
-            <div style={{ ...labelStyle }}>POWER CORE 334</div>
-            {/* Battery visual */}
-            <div
-              style={{
-                position: "relative",
-                height: 120,
-                background: "#060c18",
-                border: `2px solid ${batteryColor}`,
-                borderRadius: 4,
-                marginBottom: 8,
-                overflow: "hidden",
-                boxShadow: `0 0 10px ${batteryColor}44`,
-              }}
-            >
-              <div
-                style={{
-                  position: "absolute",
-                  bottom: 0,
-                  left: 0,
-                  right: 0,
-                  height: `${battery}%`,
-                  background: `linear-gradient(to top, ${batteryColor}cc, ${batteryColor}44)`,
-                  transition: "height 0.3s",
-                }}
-              />
-              <div
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: 20,
-                  fontWeight: "bold",
-                  color: batteryColor,
-                  textShadow: `0 0 8px ${batteryColor}`,
-                  zIndex: 1,
-                }}
-              >
-                {Math.round(battery)}%
-              </div>
-            </div>
-            <div
-              style={{
-                fontSize: 10,
-                textAlign: "center",
-                color: batteryCharging ? "#f0c040" : "#4a6fa5",
-                marginBottom: 6,
-              }}
-            >
-              {batteryCharging
-                ? "⚡ CHARGING..."
-                : battery >= 100
-                  ? "✓ FULL CHARGE"
-                  : "● STANDBY"}
-            </div>
-            <button
-              type="button"
-              data-ocid="battery.primary_button"
-              onClick={startCharging}
-              style={{
-                width: "100%",
-                background: "#0a1a30",
-                border: "1px solid #1e3a5f",
-                color: "#f0c040",
-                padding: "6px",
-                borderRadius: 4,
-                cursor: "pointer",
-                fontSize: 10,
-                letterSpacing: "0.1em",
-              }}
-            >
-              ⚡ CHARGE
-            </button>
-            <div
-              style={{
-                marginTop: 6,
-                fontSize: 9,
-                color: "#2a4a6f",
-                textAlign: "center",
-              }}
-            >
-              {isPlaying
-                ? "AMP POWERED · ACTIVE"
-                : trackName
-                  ? "FILE LOADED · READY"
-                  : "AMP POWER · STANDBY"}{" "}
-              · MEMORY ✓
-            </div>
-          </div>
-        </div>
-
-        {/* ===== ROW: 4 ENGINES ===== */}
-        <div>
-          <div style={{ ...labelStyle, marginBottom: 8 }}>
-            SOUND ENGINES — A⁺B⁺C⁺D⁺ SMART CLASS · MEMORY ACTIVE · ZERO GAIN
-          </div>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+              display: "flex",
               gap: 10,
+              justifyContent: "center",
+              marginTop: 14,
+              flexWrap: "wrap",
             }}
           >
-            {engines.map((eng, i) => (
-              <div
-                key={eng.id}
-                data-ocid={`engine.panel.${i + 1}`}
+            {["A⁺", "B⁺", "C⁺", "D⁺"].map((b) => (
+              <span
+                key={b}
                 style={{
-                  ...ps,
-                  border: `1px solid ${eng.on ? "#1e5f3a" : "#1e3a5f"}`,
-                  boxShadow: eng.on ? "0 0 15px rgba(0,255,136,0.15)" : "none",
+                  background: "linear-gradient(135deg, #f5c542, #d4a012)",
+                  color: "#0a0e1a",
+                  fontWeight: 900,
+                  fontSize: 15,
+                  padding: "5px 14px",
+                  borderRadius: 5,
+                  boxShadow: "0 0 14px rgba(245,197,66,0.55)",
                 }}
               >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    marginBottom: 8,
-                  }}
-                >
-                  <div
-                    style={{ ...goldText, fontSize: 11, fontWeight: "bold" }}
-                  >
-                    {eng.label}
-                  </div>
-                  <button
-                    type="button"
-                    data-ocid={`engine.toggle.${i + 1}`}
-                    onClick={() => toggleEngine(eng.id)}
-                    style={{
-                      background: eng.on ? "#002a10" : "#0d1526",
-                      border: `1px solid ${eng.on ? "#00ff88" : "#1e3a5f"}`,
-                      color: eng.on ? "#00ff88" : "#4a6fa5",
-                      padding: "2px 8px",
-                      borderRadius: 3,
-                      cursor: "pointer",
-                      fontSize: 9,
-                      letterSpacing: "0.1em",
-                      boxShadow: eng.on
-                        ? "0 0 6px rgba(0,255,136,0.4)"
-                        : "none",
-                    }}
-                  >
-                    {eng.on ? "ON" : "OFF"}
-                  </button>
-                </div>
-                {/* A+B+C+D class badge */}
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    marginBottom: 6,
-                  }}
-                >
-                  <span
-                    style={{
-                      color: "#f0c040",
-                      textShadow:
-                        "0 0 10px #f0c040, 0 0 20px rgba(240,192,64,0.5)",
-                      fontSize: 14,
-                      fontWeight: "bold",
-                      background: "rgba(240,192,64,0.1)",
-                      border: "1px solid rgba(240,192,64,0.4)",
-                      borderRadius: 4,
-                      padding: "1px 8px",
-                    }}
-                  >
-                    {ENGINE_CLASSES[i]}
-                  </span>
-                  <span
-                    style={{
-                      fontSize: 8,
-                      color: "#00ff88",
-                      letterSpacing: "0.1em",
-                    }}
-                  >
-                    SMART ENGINE
-                  </span>
-                </div>
-                <div
-                  style={{
-                    fontSize: 9,
-                    color: "#4a8fa5",
-                    marginBottom: 6,
-                    letterSpacing: "0.05em",
-                  }}
-                >
-                  {eng.type.toUpperCase()} · {eng.range}
-                </div>
-                <div style={{ marginBottom: 6 }}>
-                  <div style={{ ...dimText, marginBottom: 4 }}>
-                    SIGNAL ACTIVITY
-                  </div>
-                  <SignalBar
-                    active={eng.on && isPlaying}
-                    level={engineLevels[i]}
-                  />
-                </div>
-                <div
-                  style={{
-                    fontSize: 9,
-                    color: eng.on ? commanderColor : "#1e3a5f",
-                    textShadow: eng.on ? `0 0 6px ${commanderColor}` : "none",
-                  }}
-                >
-                  ● {eng.on ? `${eng.frequency}Hz ACTIVE` : "BYPASSED"}
-                </div>
-              </div>
+                {b}
+              </span>
             ))}
           </div>
-        </div>
-
-        {/* ===== ROW: 10-BAND EQ + COMMANDER + STABILIZER ===== */}
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-          {/* 10-band EQ — Rack Hardware Style */}
           <div
-            style={{ flex: "2 1 380px", minWidth: 0 }}
-            className="rack-eq-panel"
+            style={{
+              color: "#4a6080",
+              fontSize: 11,
+              letterSpacing: 3,
+              marginTop: 10,
+            }}
           >
-            <div className="rack-eq-faceplate">
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span
-                  style={{
-                    fontSize: 9,
-                    fontWeight: "bold",
-                    color: "#7ab3e0",
-                    letterSpacing: "0.12em",
-                  }}
-                >
-                  PSP·DJ·EQ·10
-                </span>
-                <span
-                  style={{
-                    fontSize: 7,
-                    color: "#2a4a6f",
-                    letterSpacing: "0.08em",
-                  }}
-                >
-                  GRAPHIC EQUALIZER
-                </span>
-              </div>
-              <span
-                style={{ ...goldText, fontSize: 8, letterSpacing: "0.1em" }}
-              >
-                A⁺B⁺C⁺D⁺
-              </span>
-            </div>
-            <div className="rack-eq-sliders" style={{ height: 132 }}>
-              <div className="rack-eq-zeroline" />
-              {EQ10_BANDS.map((freq, i) => {
-                const pct = i / (EQ10_BANDS.length - 1);
-                const r = Math.round(30 + pct * 90);
-                const g = Math.round(95 + pct * 97);
-                const b = Math.round(225 - pct * 165);
-                const thumbColor = `linear-gradient(180deg, rgb(${r + 40},${g + 20},${b}) 0%, rgb(${r},${g},${b - 30}) 100%)`;
-                return (
-                  <div key={freq} className="rack-eq-band">
-                    <div
-                      className={`rack-eq-db${eq10vals[i] > 0 ? " active-pos" : eq10vals[i] < 0 ? " active-neg" : ""}`}
-                    >
-                      {eq10vals[i] !== 0
-                        ? (eq10vals[i] > 0 ? "+" : "") + eq10vals[i]
-                        : "·"}
-                    </div>
-                    <div className="rack-v-range-wrapper">
-                      <input
-                        data-ocid={`eq10.input.${i + 1}`}
-                        type="range"
-                        className="rack-v-range"
-                        style={
-                          {
-                            "--rack-thumb-color": thumbColor,
-                          } as React.CSSProperties
-                        }
-                        min={-12}
-                        max={12}
-                        step={0.5}
-                        value={eq10vals[i]}
-                        onChange={(e) => {
-                          const v = Number.parseFloat(e.target.value);
-                          setEq10vals((prev) =>
-                            prev.map((x, j) => (j === i ? v : x)),
-                          );
-                        }}
-                      />
-                    </div>
-                    <div className="rack-eq-freq">
-                      {freq >= 1000 ? `${freq / 1000}k` : freq}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+            HIGH-CLASS AUDIO PROCESSING SYSTEM — SRS 22 CHIP
           </div>
+        </header>
 
-          {/* Commander */}
-          <div style={{ ...ps, flex: "1 1 220px", minWidth: 0 }}>
-            <div style={{ ...labelStyle, marginBottom: 8 }}>
-              COMMANDER — MASTER CONTROL
-            </div>
+        {/* ── File Picker ── */}
+        <section style={{ marginBottom: 20 }}>
+          <div style={PANEL}>
+            <div style={PANEL_TITLE}>▶ LOAD MUSIC FILE</div>
             <div
               style={{
                 display: "flex",
                 alignItems: "center",
-                justifyContent: "space-between",
-                marginBottom: 10,
+                gap: 16,
+                flexWrap: "wrap",
               }}
             >
-              <span
-                style={{
-                  fontSize: 11,
-                  color: commanderColor,
-                  textShadow: `0 0 8px ${commanderColor}`,
-                }}
+              <label
+                data-ocid="file.upload_button"
+                style={{ ...BTN_GOLD, display: "inline-block" }}
               >
-                {commanderOn ? "● COMMANDER ON" : "○ COMMANDER OFF"}
-              </span>
-              <button
-                type="button"
-                data-ocid="commander.toggle"
-                onClick={() => setCommanderOn((p) => !p)}
-                style={{
-                  background: commanderOn ? "#002a10" : "#0d1526",
-                  border: `2px solid ${commanderColor}`,
-                  color: commanderColor,
-                  padding: "4px 12px",
-                  borderRadius: 4,
-                  cursor: "pointer",
-                  fontSize: 11,
-                  fontWeight: "bold",
-                  boxShadow: commanderOn
-                    ? `0 0 12px ${commanderColor}66`
-                    : "none",
-                }}
-              >
-                {commanderOn ? "ON" : "OFF"}
-              </button>
-            </div>
-
-            <div
-              style={{
-                background: "#060c18",
-                border: `1px solid ${commanderColor}44`,
-                borderRadius: 4,
-                padding: 8,
-                marginBottom: 8,
-              }}
-            >
+                📂 BROWSE FILE
+                <input
+                  type="file"
+                  accept="audio/*"
+                  onChange={handleFileLoad}
+                  style={{ display: "none" }}
+                />
+              </label>
               <div
                 style={{
-                  ...goldText,
-                  fontSize: 10,
-                  marginBottom: 6,
-                  letterSpacing: "0.1em",
+                  color: fileName ? "#00ff88" : "#4a6080",
+                  fontSize: 13,
                 }}
               >
-                ✦ SRS 22 CHIP
+                {fileName ?? "No file loaded — select an audio file to begin"}
               </div>
-              {["MONITOR", "COMMANDER", "STABILIZER"].map((label) => (
+            </div>
+          </div>
+        </section>
+
+        {/* ── Battery ── */}
+        <section style={{ marginBottom: 20 }}>
+          <div style={PANEL}>
+            <div style={PANEL_TITLE}>⚡ BATTERY SYSTEM</div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 20,
+                flexWrap: "wrap",
+              }}
+            >
+              {/* Battery bar */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <div
-                  key={label}
+                  style={{
+                    width: 180,
+                    height: 34,
+                    border: `2px solid ${batteryColor}`,
+                    borderRadius: 5,
+                    position: "relative",
+                    background: "#06090f",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${battery}%`,
+                      height: "100%",
+                      background: `linear-gradient(90deg, ${batteryColor}88, ${batteryColor})`,
+                      transition: "width 0.4s",
+                      borderRadius: 3,
+                    }}
+                  />
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontWeight: 800,
+                      fontSize: 14,
+                      color: "#fff",
+                      textShadow: "0 1px 3px #000",
+                    }}
+                  >
+                    {battery.toFixed(0)}%
+                  </div>
+                </div>
+                <div
+                  style={{
+                    width: 8,
+                    height: 16,
+                    background: batteryColor,
+                    borderRadius: "0 3px 3px 0",
+                  }}
+                />
+              </div>
+              <button
+                type="button"
+                data-ocid="battery.primary_button"
+                onClick={() => setIsCharging(true)}
+                style={isCharging ? BTN_GREEN : BTN_GOLD}
+              >
+                {isCharging ? "⚡ CHARGING..." : "CHARGE"}
+              </button>
+              <div
+                style={{
+                  color: battery <= 0 ? "#ff5533" : "#4a6080",
+                  fontSize: 12,
+                }}
+              >
+                {battery <= 0
+                  ? "⚠ BATTERY DEAD — charge to play"
+                  : battery >= 100
+                    ? "✓ FULLY CHARGED"
+                    : isCharging
+                      ? "Charging amp power..."
+                      : `Powering amplifier — ${battery.toFixed(0)}%`}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* ── Transport ── */}
+        <section style={{ marginBottom: 20 }}>
+          <div style={PANEL}>
+            <div style={PANEL_TITLE}>▶ TRANSPORT CONTROLS</div>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                data-ocid="transport.primary_button"
+                onClick={handlePlay}
+                disabled={!audioBuffer || battery <= 0}
+                style={{
+                  ...BTN_GOLD,
+                  opacity: !audioBuffer || battery <= 0 ? 0.45 : 1,
+                  fontSize: 14,
+                  padding: "10px 28px",
+                }}
+              >
+                ▶ PLAY
+              </button>
+              <button
+                type="button"
+                data-ocid="transport.secondary_button"
+                onClick={handlePause}
+                disabled={!isPlaying}
+                style={{
+                  ...BTN_GOLD,
+                  opacity: !isPlaying ? 0.45 : 1,
+                  fontSize: 14,
+                  padding: "10px 28px",
+                }}
+              >
+                ⏸ PAUSE
+              </button>
+              <button
+                type="button"
+                data-ocid="transport.delete_button"
+                onClick={handleStop}
+                style={{ ...BTN_MUTED, fontSize: 14, padding: "10px 28px" }}
+              >
+                ⏹ STOP
+              </button>
+              {isPlaying && (
+                <div
+                  data-ocid="transport.success_state"
                   style={{
                     display: "flex",
                     alignItems: "center",
                     gap: 6,
-                    marginBottom: 4,
+                    color: "#00ff88",
+                    fontSize: 12,
+                    fontWeight: 700,
                   }}
                 >
-                  <div
+                  <motion.div
+                    animate={{ opacity: [1, 0.3, 1] }}
+                    transition={{
+                      repeat: Number.POSITIVE_INFINITY,
+                      duration: 1,
+                    }}
                     style={{
-                      width: 6,
-                      height: 6,
+                      width: 8,
+                      height: 8,
                       borderRadius: "50%",
-                      background: commanderColor,
-                      boxShadow: `0 0 4px ${commanderColor}`,
+                      background: "#00ff88",
                     }}
                   />
-                  <span style={{ fontSize: 9, color: commanderColor }}>
-                    {label} ACTIVE
-                  </span>
+                  PLAYING
                 </div>
-              ))}
-            </div>
-
-            <div style={{ fontSize: 9, color: "#2a4a6f", lineHeight: 1.6 }}>
-              <div>● ZERO CLIPPING</div>
-              <div>● ZERO BACKGROUND NOISE</div>
-              <div>● ANTI-DISTORTION</div>
-              <div>● 20 SMART CHIPS ACTIVE</div>
-            </div>
-          </div>
-
-          {/* Stabilizer */}
-          <div style={{ ...ps, flex: "1 1 220px", minWidth: 0 }}>
-            <div style={{ ...labelStyle, marginBottom: 8 }}>STABILIZER</div>
-            <div
-              style={{
-                ...greenText,
-                fontSize: 10,
-                marginBottom: 6,
-                fontWeight: "bold",
-              }}
-            >
-              800,000,000 + 800,000,000
-            </div>
-            <div style={{ ...goldText, fontSize: 9, marginBottom: 10 }}>
-              ✦ TITANIUM GRADE
-            </div>
-
-            {[
-              "SIGNAL CORRECTION",
-              "DISTORTION REMOVAL",
-              "SMART CHIP ACTIVE",
-              "17MB MEMORY",
-              "COMMANDER LINKED",
-              "CHAIN BLOCK WIRED",
-            ].map((label) => (
-              <div
-                key={label}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  marginBottom: 5,
-                }}
-              >
-                <div
-                  style={{
-                    width: 7,
-                    height: 7,
-                    borderRadius: "50%",
-                    background: commanderColor,
-                    boxShadow: `0 0 5px ${commanderColor}`,
-                    flexShrink: 0,
-                  }}
-                />
-                <span style={{ fontSize: 9, color: commanderColor }}>
-                  {label}
-                </span>
-              </div>
-            ))}
-
-            <div style={{ marginTop: 8, fontSize: 9, color: "#2a4a6f" }}>
-              DOES NOT LIMIT SIGNAL · FULL POWER PRESERVED
-            </div>
-          </div>
-        </div>
-
-        {/* ===== ROW: BASS + LOUD BOOSTER + 1700 SLIDER + CHAIN BLOCK ===== */}
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-          {/* 80Hz Bass */}
-          <div style={{ ...ps, flex: "1 1 160px", minWidth: 0 }}>
-            <div style={{ ...labelStyle }}>80Hz BASS PROGRAMME</div>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                marginBottom: 8,
-              }}
-            >
-              <span
-                style={{ fontSize: 10, color: bassOn ? "#00ff88" : "#4a6fa5" }}
-              >
-                {bassOn ? "● ACTIVE" : "○ OFF"}
-              </span>
-              <button
-                type="button"
-                data-ocid="bass.toggle"
-                onClick={() => {
-                  setBassOn((p) => !p);
-                  const { bassFilter } = audioRef.current;
-                  if (bassFilter) bassFilter.gain.value = !bassOn ? 3 : 0;
-                }}
-                style={{
-                  background: bassOn ? "#002a10" : "#0d1526",
-                  border: `1px solid ${bassOn ? "#00ff88" : "#1e3a5f"}`,
-                  color: bassOn ? "#00ff88" : "#4a6fa5",
-                  padding: "3px 10px",
-                  borderRadius: 3,
-                  cursor: "pointer",
-                  fontSize: 10,
-                }}
-              >
-                {bassOn ? "ON" : "OFF"}
-              </button>
-            </div>
-            <div style={{ fontSize: 9, color: "#2a4a6f", lineHeight: 1.6 }}>
-              <div>LOWSHELF · 80Hz</div>
-              <div>NATURAL DROP</div>
-              <div>ROCK CONCERT BASS</div>
-            </div>
-          </div>
-
-          {/* Loud Booster */}
-          <div style={{ ...ps, flex: "1 1 180px", minWidth: 0 }}>
-            <div style={{ ...labelStyle }}>LOUD BOOSTER 1700</div>
-            <div style={{ ...goldText, fontSize: 11, marginBottom: 6 }}>
-              ✦ TITANIUM CLAMP
-            </div>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                marginBottom: 4,
-              }}
-            >
-              <span style={{ ...goldText, fontSize: 10 }}>0</span>
-              <span
-                style={{ color: commanderColor, fontSize: 11, fontWeight: 700 }}
-              >
-                {loudBoosterVal}
-              </span>
-              <span style={{ ...goldText, fontSize: 10 }}>1700</span>
-            </div>
-            <input
-              data-ocid="loud_booster.input"
-              type="range"
-              className="h-range"
-              min={0}
-              max={1700}
-              step={1}
-              value={loudBoosterVal}
-              onChange={(e) =>
-                setLoudBoosterVal(Number.parseInt(e.target.value))
-              }
-              style={{ width: "100%" }}
-            />
-            <div
-              style={{
-                display: "flex",
-                gap: 6,
-                flexWrap: "wrap",
-                marginTop: 8,
-              }}
-            >
-              {["CHAIN LINKED", "TITANIUM CLAMP", "ZERO DISTORTION"].map(
-                (l) => (
-                  <div
-                    key={l}
-                    style={{ display: "flex", alignItems: "center", gap: 4 }}
-                  >
-                    <div
-                      style={{
-                        width: 5,
-                        height: 5,
-                        borderRadius: "50%",
-                        background: commanderColor,
-                        boxShadow: `0 0 4px ${commanderColor}`,
-                      }}
-                    />
-                    <span style={{ fontSize: 8, color: commanderColor }}>
-                      {l}
-                    </span>
-                  </div>
-                ),
               )}
             </div>
           </div>
+        </section>
 
-          {/* 1700 Volume Slider */}
-          <div style={{ ...ps, flex: "2 1 200px", minWidth: 0 }}>
+        {/* ── Commander ── */}
+        <section style={{ marginBottom: 20 }}>
+          <div
+            style={{
+              background: "linear-gradient(135deg, #0c1828 0%, #142040 100%)",
+              border: `2px solid ${commanderOn ? "#f5c542" : "#1e3060"}`,
+              borderRadius: 12,
+              padding: 24,
+              boxShadow: commanderOn
+                ? "0 0 36px rgba(245,197,66,0.3), inset 0 0 24px rgba(245,197,66,0.04)"
+                : "0 4px 16px rgba(0,0,0,0.5)",
+            }}
+          >
+            {/* Header row */}
             <div
               style={{
                 display: "flex",
-                justifyContent: "space-between",
                 alignItems: "center",
-                marginBottom: 8,
+                justifyContent: "space-between",
+                marginBottom: 20,
+                flexWrap: "wrap",
+                gap: 12,
               }}
             >
-              <div style={{ ...labelStyle, marginBottom: 0 }}>
-                1700 VOLUME CONTROL
+              <div>
+                <div
+                  style={{
+                    fontFamily: "'Bricolage Grotesque', sans-serif",
+                    fontSize: 22,
+                    fontWeight: 900,
+                    color: "#f5c542",
+                    letterSpacing: 3,
+                    textShadow: commanderOn
+                      ? "0 0 12px rgba(245,197,66,0.5)"
+                      : "none",
+                  }}
+                >
+                  ⚙ COMMANDER
+                </div>
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: "#4a6080",
+                    letterSpacing: 2,
+                    marginTop: 2,
+                  }}
+                >
+                  MASTER CONTROL SYSTEM — MEMORY GRID
+                </div>
               </div>
-              <span style={{ ...goldText, fontSize: 11 }}>{volume1700}</span>
+              <button
+                type="button"
+                data-ocid="commander.toggle"
+                onClick={() => setCommanderOn((v) => !v)}
+                style={{
+                  background: commanderOn
+                    ? "linear-gradient(135deg, #003d20, #006040)"
+                    : "linear-gradient(135deg, #1a2844, #0d1830)",
+                  border: `2px solid ${commanderOn ? "#00ff88" : "#f5c542"}`,
+                  color: commanderOn ? "#00ff88" : "#f5c542",
+                  padding: "12px 36px",
+                  borderRadius: 8,
+                  cursor: "pointer",
+                  fontWeight: 900,
+                  fontSize: 16,
+                  letterSpacing: 2,
+                  boxShadow: commanderOn
+                    ? "0 0 22px rgba(0,255,136,0.4)"
+                    : "0 0 8px rgba(245,197,66,0.2)",
+                }}
+              >
+                {commanderOn ? "● ON" : "○ OFF"}
+              </button>
             </div>
-            <input
-              data-ocid="volume1700.input"
-              type="range"
-              className="h-range"
-              min={0}
-              max={1700}
-              step={1}
-              value={volume1700}
-              onChange={(e) => setVolume1700(Number.parseInt(e.target.value))}
-              style={{ width: "100%" }}
-            />
+
+            {/* SRS 22 Chip */}
             <div
               style={{
-                display: "flex",
-                justifyContent: "space-between",
-                marginTop: 4,
-                fontSize: 9,
-                color: "#2a4a6f",
+                background: "#06090f",
+                border: "1px solid #1e2e4a",
+                borderRadius: 8,
+                padding: 16,
+                marginBottom: 16,
               }}
             >
-              <span>SILENT</span>
-              <span>MAX OUTPUT</span>
+              <div
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  letterSpacing: 2,
+                  color: "#f5c542",
+                  marginBottom: 10,
+                }}
+              >
+                {commanderOn
+                  ? "SRS 22 CHIP — DISTORTION ELIMINATED ✓  |  PROCESSOR: ACTIVE"
+                  : "SRS 22 CHIP — CLARITY ENGINE — ANTI-DISTORTION  |  PROCESSOR: STANDBY"}
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {[
+                  "NOISE GATE",
+                  "A⁺ CLARITY",
+                  "B⁺ WARMTH",
+                  "C⁺ DETAIL",
+                  "D⁺ OUTPUT",
+                  "ANTI-CLIP",
+                  "CHAIN LOCK",
+                  "MONITOR",
+                ].map((lbl) => (
+                  <div
+                    key={lbl}
+                    style={{
+                      background: commanderOn ? "#002a18" : "#0f1628",
+                      border: `1px solid ${commanderOn ? "#00ff88" : "#1e2e4a"}`,
+                      color: commanderOn ? "#00ff88" : "#4a6080",
+                      fontSize: 10,
+                      fontWeight: 700,
+                      padding: "4px 9px",
+                      borderRadius: 4,
+                      letterSpacing: 1,
+                    }}
+                  >
+                    {lbl}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Memory Grid */}
+            <div
+              style={{
+                background: "#06090f",
+                border: "1px solid #1e2e4a",
+                borderRadius: 8,
+                padding: 16,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  letterSpacing: 2,
+                  color: "#f5c542",
+                  marginBottom: 10,
+                }}
+              >
+                MEMORY GRID — ALL SYSTEMS
+              </div>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))",
+                  gap: 8,
+                }}
+              >
+                {[
+                  {
+                    k: "ENGINES",
+                    v: `${engineStates.filter(Boolean).length}/4 ACTIVE`,
+                  },
+                  { k: "10-BAND EQ", v: "10 BANDS LIVE" },
+                  { k: "31-BAND EQ", v: "31 BANDS LIVE" },
+                  { k: "BATTERY", v: `${battery.toFixed(0)}%` },
+                  { k: "STABILIZER", v: "ONLINE" },
+                  { k: "CHAIN BLOCK", v: "LOCKED" },
+                  { k: "LOUD BOOST", v: `${loudBooster}` },
+                  { k: "VOLUME", v: `${masterVolume}` },
+                  { k: "80Hz BASS", v: bass80On ? "ON" : "OFF" },
+                  { k: "AUTO GEN", v: autoGenOn ? "ACTIVE" : "STANDBY" },
+                ].map((item) => (
+                  <div
+                    key={item.k}
+                    style={{
+                      background: "#0d1528",
+                      border: `1px solid ${commanderOn ? "#00ff88" : "#1e2e4a"}`,
+                      borderRadius: 5,
+                      padding: "6px 10px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        color: "#4a6080",
+                        fontSize: 9,
+                        letterSpacing: 1,
+                      }}
+                    >
+                      {item.k}
+                    </div>
+                    <div
+                      style={{
+                        color: commanderOn ? "#00ff88" : "#f5c542",
+                        fontWeight: 800,
+                        fontSize: 12,
+                      }}
+                    >
+                      {item.v}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
+        </section>
 
-          {/* Chain Block */}
-          <div style={{ ...ps, flex: "1 1 160px", minWidth: 0 }}>
-            <div style={{ ...labelStyle }}>CHAIN BLOCK</div>
-            <div
-              style={{
-                ...greenText,
-                fontSize: 10,
-                marginBottom: 8,
-                fontWeight: "bold",
-              }}
-            >
-              ALL SYSTEMS CONNECTED
-            </div>
-            {[
-              "ENGINES",
-              "EQ 10-BAND",
-              "EQ 31-BAND",
-              "BASS 80Hz",
-              "STABILIZER",
-              "COMMANDER",
-              "SRS 22",
-            ].map((sys) => (
+        {/* ── Sound Engines 2×2 ── */}
+        <section style={{ marginBottom: 20 }}>
+          <div
+            style={{
+              color: "#f5c542",
+              fontSize: 12,
+              fontWeight: 800,
+              letterSpacing: 2,
+              marginBottom: 12,
+            }}
+          >
+            ⚡ SOUND ENGINES — PARALLEL ROUTING — A⁺B⁺C⁺D⁺
+          </div>
+          <div
+            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}
+          >
+            {ENGINE_CONFIG.map((eng, idx) => (
               <div
-                key={sys}
+                key={eng.name}
+                data-ocid={`engine.panel.${idx + 1}`}
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 5,
-                  marginBottom: 3,
+                  ...PANEL,
+                  border: `1px solid ${engineStates[idx] && commanderOn ? "#00ff88" : engineStates[idx] ? "#2a5040" : "#1e2e4a"}`,
                 }}
               >
                 <div
                   style={{
-                    width: 5,
-                    height: 5,
-                    borderRadius: "50%",
-                    background: commanderColor,
-                    boxShadow: `0 0 3px ${commanderColor}`,
-                    flexShrink: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    marginBottom: 10,
                   }}
-                />
-                <span style={{ fontSize: 8, color: commanderColor }}>
-                  {sys}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* ===== ROW: AUTO FREQUENCY GENERATOR ===== */}
-        <div style={{ ...ps }}>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: 10,
-              flexWrap: "wrap",
-              gap: 8,
-            }}
-          >
-            <div style={{ ...labelStyle, marginBottom: 0 }}>
-              AUTO FREQUENCY GENERATOR
-            </div>
-            <div
-              style={{
-                background: "#060c18",
-                border: "1px solid #1e3a5f",
-                borderRadius: 3,
-                padding: "3px 10px",
-                fontSize: 9,
-                color: "#7ab3e0",
-                letterSpacing: "0.1em",
-              }}
-            >
-              PROFILE: <span style={greenText}>{freqProfile}</span>
-            </div>
-            <div style={{ fontSize: 9, color: "#4a6fa5" }}>
-              ANALYZES EVERY 500ms · AUTO-ADJUSTS ENGINES
-            </div>
-          </div>
-          <div
-            style={{
-              display: "flex",
-              gap: 4,
-              alignItems: "flex-end",
-              height: 60,
-            }}
-          >
-            {specBars.map((level, i) => (
-              <div
-                key={["b0", "b1", "b2", "b3", "b4", "b5", "b6", "b7"][i]}
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  height: `${Math.max(4, level * 100)}%`,
-                  background: "linear-gradient(to top, #00ff88, #00aaff)",
-                  borderRadius: "2px 2px 0 0",
-                  boxShadow:
-                    level > 0.1 ? "0 0 8px rgba(0,255,136,0.4)" : "none",
-                  transition: "height 0.08s",
-                  opacity: level > 0.01 ? 1 : 0.15,
-                }}
-              />
-            ))}
-          </div>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              marginTop: 4,
-              fontSize: 8,
-              color: "#2a4a6f",
-            }}
-          >
-            <span>20Hz</span>
-            <span>250Hz</span>
-            <span>1kHz</span>
-            <span>4kHz</span>
-            <span>20kHz</span>
-          </div>
-        </div>
-
-        {/* ===== ROW: 31-BAND EQ — RACK HARDWARE STYLE ===== */}
-        <div
-          className="rack-eq-panel"
-          style={{ width: "100%", boxSizing: "border-box" }}
-        >
-          <div className="rack-eq-faceplate">
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span
-                style={{
-                  fontSize: 10,
-                  fontWeight: "bold",
-                  color: "#7ab3e0",
-                  letterSpacing: "0.12em",
-                }}
-              >
-                PSP·GEQ·31
-              </span>
-              <span
-                style={{
-                  fontSize: 7,
-                  color: "#2a4a6f",
-                  letterSpacing: "0.07em",
-                }}
-              >
-                POWERSOUND PRO — 31-BAND GRAPHIC EQ
-              </span>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{ display: "flex", gap: 4 }}>
-                {["ROCK", "HIP-HOP", "POP", "FLAT"].map((preset, pi) => (
+                >
+                  <div
+                    style={{ display: "flex", alignItems: "center", gap: 8 }}
+                  >
+                    <span
+                      style={{
+                        color: "#f5c542",
+                        fontWeight: 900,
+                        fontSize: 11,
+                        letterSpacing: 2,
+                      }}
+                    >
+                      {eng.name}
+                    </span>
+                    <span
+                      style={{
+                        background: "linear-gradient(135deg, #f5c542, #c8900a)",
+                        color: "#0a0e1a",
+                        fontWeight: 900,
+                        fontSize: 11,
+                        padding: "2px 7px",
+                        borderRadius: 3,
+                      }}
+                    >
+                      {eng.cls}
+                    </span>
+                  </div>
                   <button
                     type="button"
-                    key={preset}
-                    data-ocid={`eq31.button.${pi + 1}`}
-                    onClick={() =>
-                      applyPreset31([ROCK_31, HIPHOP_31, POP_31, FLAT_31][pi])
-                    }
-                    style={{
-                      background: "#0d2050",
-                      border: "1px solid #1e5fa5",
-                      color: "#7ab3e0",
-                      padding: "2px 6px",
-                      borderRadius: 2,
-                      cursor: "pointer",
-                      fontSize: 8,
-                      letterSpacing: "0.05em",
-                    }}
+                    data-ocid={`engine.toggle.${idx + 1}`}
+                    onClick={() => toggleEngine(idx)}
+                    style={engineStates[idx] ? BTN_GREEN : BTN_MUTED}
                   >
-                    {preset}
+                    {engineStates[idx] ? "ON" : "OFF"}
                   </button>
-                ))}
-              </div>
-              <span
-                style={{ ...goldText, fontSize: 8, letterSpacing: "0.1em" }}
-              >
-                A⁺B⁺C⁺D⁺
-              </span>
-            </div>
-          </div>
-          {/* Sliders row — all 31 bands in one horizontal rack */}
-          <div
-            className="rack-eq-sliders"
-            style={{ height: 132, width: "100%" }}
-          >
-            <div className="rack-eq-zeroline" />
-            {EQ31_BANDS.map((freq, i) => {
-              const pct = i / (EQ31_BANDS.length - 1);
-              const r = Math.round(20 + pct * 200);
-              const g = Math.round(80 + pct * 112);
-              const b = Math.round(230 - pct * 170);
-              const thumbColor = `linear-gradient(180deg, rgb(${r + 30},${g + 20},${b}) 0%, rgb(${r},${g},${b - 20}) 100%)`;
-              return (
-                <div key={freq} className="rack-eq-band">
-                  <div
-                    className={`rack-eq-db${eq31vals[i] > 0 ? " active-pos" : eq31vals[i] < 0 ? " active-neg" : ""}`}
-                  >
-                    {eq31vals[i] !== 0
-                      ? (eq31vals[i] > 0 ? "+" : "") + eq31vals[i]
-                      : "·"}
-                  </div>
-                  <div className="rack-v-range-wrapper">
-                    <input
-                      data-ocid={`eq31.input.${i + 1}`}
-                      type="range"
-                      className="rack-v-range-31"
-                      style={
-                        {
-                          "--rack-thumb-color": thumbColor,
-                        } as React.CSSProperties
-                      }
-                      min={-12}
-                      max={12}
-                      step={0.5}
-                      value={eq31vals[i]}
-                      onChange={(e) => {
-                        const v = Number.parseFloat(e.target.value);
-                        setEq31vals((prev) =>
-                          prev.map((x, j) => (j === i ? v : x)),
-                        );
-                      }}
-                    />
-                  </div>
-                  <div className="rack-eq-freq">
-                    {freq >= 1000 ? `${freq / 1000}k` : freq}
-                  </div>
                 </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* ===== INSTRUMENT MIXER ===== */}
-        <div data-ocid="mixer.section" style={{ ...ps }}>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: 10,
-            }}
-          >
-            <div style={{ ...labelStyle, marginBottom: 0 }}>
-              INSTRUMENT MIXER — SET &amp; EQ
-            </div>
-            <span style={{ ...goldText, fontSize: 9 }}>
-              A⁺B⁺C⁺D⁺ CHANNEL PROCESSING
-            </span>
-          </div>
-          <div
-            style={{
-              display: "flex",
-              gap: 12,
-              overflowX: "auto",
-              paddingBottom: 8,
-            }}
-          >
-            {["FLAT", "BASS", "DRUMS", "GUITAR", "VOCALS", "KEYS", "SYNTH"].map(
-              (inst) => (
                 <div
-                  key={inst}
+                  style={{
+                    color: "#4a6080",
+                    fontSize: 10,
+                    letterSpacing: 1,
+                    marginBottom: 8,
+                  }}
+                >
+                  {eng.label}
+                </div>
+                {/* Signal bar */}
+                <div
+                  style={{
+                    height: 7,
+                    background: "#06090f",
+                    borderRadius: 4,
+                    border: "1px solid #1e2e4a",
+                    overflow: "hidden",
+                  }}
+                >
+                  <motion.div
+                    animate={{
+                      width: `${(engineStates[idx] ? signalLevels[idx] : 0) * 100}%`,
+                    }}
+                    transition={{ duration: 0.08 }}
+                    style={{
+                      height: "100%",
+                      background: "#00ff88",
+                      borderRadius: 4,
+                      boxShadow: "0 0 6px #00ff88",
+                    }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* ── 80Hz Bass Toggle ── */}
+        <section style={{ marginBottom: 20 }}>
+          <div
+            style={{
+              ...PANEL,
+              display: "flex",
+              alignItems: "center",
+              gap: 20,
+              flexWrap: "wrap",
+            }}
+          >
+            <button
+              type="button"
+              data-ocid="bass80.toggle"
+              onClick={toggleBass80}
+              style={bass80On ? BTN_GREEN : BTN_GOLD}
+            >
+              {bass80On ? "● 80Hz BASS — ON" : "○ 80Hz BASS — OFF"}
+            </button>
+            <div style={{ color: "#4a6080", fontSize: 12 }}>
+              Low-shelf filter at 80 Hz — wired to chain block
+            </div>
+          </div>
+        </section>
+
+        {/* ── 10-Band DJ EQ ── */}
+        <section style={{ marginBottom: 20 }}>
+          <div style={PANEL}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: 14,
+                flexWrap: "wrap",
+                gap: 10,
+              }}
+            >
+              <div style={PANEL_TITLE}>🎚 10-BAND DJ EQUALIZER — A⁺B⁺C⁺D⁺</div>
+              <button
+                type="button"
+                data-ocid="eq10.delete_button"
+                onClick={flattenEq10}
+                style={BTN_MUTED}
+              >
+                FLAT RESET
+              </button>
+            </div>
+
+            {/* Instrument Presets */}
+            <div
+              style={{
+                display: "flex",
+                gap: 8,
+                marginBottom: 20,
+                flexWrap: "wrap",
+              }}
+            >
+              {Object.keys(INSTRUMENT_PRESETS).map((name) => (
+                <button
+                  type="button"
+                  key={name}
+                  data-ocid="eq10.secondary_button"
+                  onClick={() => applyInstrument(name)}
+                  style={BTN_GOLD}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+
+            {/* Sliders */}
+            <div
+              style={{
+                display: "flex",
+                gap: 8,
+                alignItems: "flex-start",
+                overflowX: "auto",
+                paddingBottom: 8,
+              }}
+            >
+              {EQ10_FREQS.map((freq, idx) => (
+                <div
+                  key={freq}
                   style={{
                     display: "flex",
                     flexDirection: "column",
                     alignItems: "center",
-                    gap: 6,
-                    minWidth: 56,
-                    cursor: "pointer",
+                    minWidth: 44,
                   }}
                 >
-                  <button
-                    type="button"
-                    data-ocid={`mixer.${inst.toLowerCase()}.button`}
-                    onClick={() => {
-                      setSelectedInstrument(inst);
-                      setEq10vals(INSTRUMENT_EQ_PRESETS[inst]);
-                    }}
+                  {/* Value label */}
+                  <div
                     style={{
-                      fontSize: 8,
-                      letterSpacing: "0.1em",
-                      padding: "3px 6px",
-                      borderRadius: 3,
-                      border:
-                        selectedInstrument === inst
-                          ? "1px solid #f0c040"
-                          : "1px solid #1e3a5f",
+                      fontSize: 10,
+                      fontWeight: 700,
+                      height: 16,
                       color:
-                        selectedInstrument === inst ? "#f0c040" : "#4a6fa5",
-                      background:
-                        selectedInstrument === inst ? "#0d2050" : "transparent",
-                      boxShadow:
-                        selectedInstrument === inst
-                          ? "0 0 8px rgba(240,192,64,0.4)"
-                          : "none",
-                      textShadow:
-                        selectedInstrument === inst
-                          ? "0 0 6px #f0c040"
-                          : "none",
-                      userSelect: "none" as const,
-                    }}
-                  >
-                    {inst}
-                  </button>
-                  <div className="v-range-wrapper" style={{ height: 110 }}>
-                    <input
-                      type="range"
-                      data-ocid={`mixer.${inst.toLowerCase()}.input`}
-                      className="v-range"
-                      min={0}
-                      max={100}
-                      step={1}
-                      value={instrumentMixVals[inst] ?? 75}
-                      style={{ height: 100 }}
-                      onChange={(e) => {
-                        const v = Number.parseFloat(e.target.value);
-                        setInstrumentMixVals((prev) => ({
-                          ...prev,
-                          [inst]: v,
-                        }));
-                      }}
-                    />
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 8,
-                      color: "#4a6fa5",
+                        eq10[idx] > 0
+                          ? "#00ff88"
+                          : eq10[idx] < 0
+                            ? "#ff6644"
+                            : "#4a6080",
+                      marginBottom: 4,
                       textAlign: "center",
                     }}
                   >
-                    {instrumentMixVals[inst] ?? 75}
+                    {eq10[idx] !== 0
+                      ? (eq10[idx] > 0 ? "+" : "") + eq10[idx].toFixed(1)
+                      : "0"}
                   </div>
+                  {/* Vertical slider */}
+                  <VerticalSlider
+                    value={eq10[idx]}
+                    min={-12}
+                    max={12}
+                    step={0.1}
+                    onChange={(v) => updateEq10(idx, v)}
+                    sliderClass="eq-slider"
+                    height={120}
+                    width={32}
+                  />
+                  {/* Freq label */}
                   <div
                     style={{
-                      fontSize: 7,
-                      color: "#2a4a6f",
+                      fontSize: 9,
+                      color: "#4a6080",
+                      marginTop: 8,
                       textAlign: "center",
                     }}
                   >
-                    MIX
+                    {EQ10_LABELS[idx]}
                   </div>
                 </div>
-              ),
-            )}
+              ))}
+            </div>
           </div>
-          <div style={{ fontSize: 8, color: "#2a4a6f", marginTop: 4 }}>
-            TAP AN INSTRUMENT TO LOAD ITS EQ CURVE INTO THE 10-BAND EQUALIZER
-          </div>
-        </div>
+        </section>
 
-        {/* ===== FOOTER ===== */}
-        <div
+        {/* ── 31-Band Graphic EQ ── */}
+        <section style={{ marginBottom: 20 }}>
+          <div style={PANEL}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: 14,
+                flexWrap: "wrap",
+                gap: 10,
+              }}
+            >
+              <div style={PANEL_TITLE}>
+                🎛 31-BAND GRAPHIC EQUALIZER — PowerSound Pro Style
+              </div>
+            </div>
+
+            {/* Presets */}
+            <div
+              style={{
+                display: "flex",
+                gap: 8,
+                marginBottom: 20,
+                flexWrap: "wrap",
+              }}
+            >
+              {Object.keys(EQ31_PRESETS)
+                .filter((n) => n !== "Flat")
+                .map((name) => (
+                  <button
+                    type="button"
+                    key={name}
+                    data-ocid="eq31.secondary_button"
+                    onClick={() => applyEq31Preset(name)}
+                    style={BTN_GOLD}
+                  >
+                    {name}
+                  </button>
+                ))}
+              <button
+                type="button"
+                data-ocid="eq31.delete_button"
+                onClick={() => applyEq31Preset("Flat")}
+                style={BTN_MUTED}
+              >
+                FLAT RESET
+              </button>
+            </div>
+
+            {/* DJ Mixer Info */}
+            <div
+              style={{
+                background: "#06090f",
+                border: "1px solid #1e2e4a",
+                borderRadius: 6,
+                padding: "8px 14px",
+                marginBottom: 16,
+                display: "flex",
+                gap: 12,
+                flexWrap: "wrap",
+              }}
+            >
+              {["DJ MIX", "CROSSFADE", "BEAT SYNC", "PITCH"].map((lbl) => (
+                <div
+                  key={lbl}
+                  style={{
+                    color: "#f5c542",
+                    fontSize: 10,
+                    fontWeight: 700,
+                    letterSpacing: 1,
+                  }}
+                >
+                  ● {lbl}
+                </div>
+              ))}
+            </div>
+
+            {/* 31 Sliders — horizontally scrollable */}
+            <div style={{ overflowX: "auto", paddingBottom: 8 }}>
+              <div
+                style={{
+                  display: "flex",
+                  gap: 4,
+                  alignItems: "flex-start",
+                  minWidth: "max-content",
+                }}
+              >
+                {EQ31_FREQS.map((_, idx) => {
+                  // Color zones: bass=blue, mid=gold, high=orange
+                  const sliderCls =
+                    idx < 10
+                      ? "eq-slider eq-slider-blue"
+                      : idx < 21
+                        ? "eq-slider"
+                        : "eq-slider eq-slider-orange";
+                  return (
+                    <div
+                      key={EQ31_FREQS[idx]}
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        width: 28,
+                      }}
+                    >
+                      {/* Value */}
+                      <div
+                        style={{
+                          fontSize: 9,
+                          fontWeight: 700,
+                          height: 14,
+                          color:
+                            eq31[idx] > 0
+                              ? "#00ff88"
+                              : eq31[idx] < 0
+                                ? "#ff6644"
+                                : "#1e2e4a",
+                          marginBottom: 2,
+                          textAlign: "center",
+                        }}
+                      >
+                        {Math.abs(eq31[idx]) >= 1
+                          ? (eq31[idx] > 0 ? "+" : "") + eq31[idx].toFixed(0)
+                          : ""}
+                      </div>
+                      {/* Slider — rotate(-90deg) method */}
+                      <VerticalSlider
+                        value={eq31[idx]}
+                        min={-12}
+                        max={12}
+                        step={0.5}
+                        onChange={(v) => updateEq31(idx, v)}
+                        sliderClass={sliderCls}
+                        height={100}
+                        width={24}
+                      />
+                      {/* Freq label — rotated for space */}
+                      <div
+                        style={{
+                          fontSize: 8,
+                          color: "#4a6080",
+                          marginTop: 6,
+                          transform: "rotate(-55deg)",
+                          transformOrigin: "top center",
+                          whiteSpace: "nowrap",
+                          height: 22,
+                        }}
+                      >
+                        {EQ31_LABELS[idx]}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* ── Loud Booster + 1700 Volume (side-by-side) ── */}
+        <section style={{ marginBottom: 20 }}>
+          <div
+            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}
+          >
+            {/* Loud Booster */}
+            <div style={PANEL}>
+              <div style={PANEL_TITLE}>⚡ LOUD BOOSTER — CHAIN BLOCK</div>
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  gap: 10,
+                }}
+              >
+                <div
+                  style={{ color: "#f5c542", fontSize: 24, fontWeight: 900 }}
+                >
+                  {loudBooster}
+                </div>
+                <VerticalSlider
+                  value={loudBooster}
+                  min={0}
+                  max={1700}
+                  step={1}
+                  onChange={updateLoudBooster}
+                  sliderClass="eq-slider"
+                  height={160}
+                  width={40}
+                />
+                <div
+                  style={{ color: "#4a6080", fontSize: 10, letterSpacing: 1 }}
+                >
+                  0 ─────────── 1700
+                </div>
+              </div>
+            </div>
+
+            {/* 1700 Volume */}
+            <div style={PANEL}>
+              <div style={PANEL_TITLE}>🔊 VOLUME CONTROL — 1700</div>
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  gap: 10,
+                }}
+              >
+                <div
+                  style={{ color: "#00ff88", fontSize: 24, fontWeight: 900 }}
+                >
+                  {masterVolume}
+                </div>
+                <VerticalSlider
+                  value={masterVolume}
+                  min={0}
+                  max={1700}
+                  step={1}
+                  onChange={updateMasterVolume}
+                  sliderClass="eq-slider eq-slider-green"
+                  height={160}
+                  width={40}
+                />
+                <div
+                  style={{ color: "#4a6080", fontSize: 10, letterSpacing: 1 }}
+                >
+                  0 ─────────── 1700
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* ── Stabilizer + Auto Freq Gen ── */}
+        <section style={{ marginBottom: 20 }}>
+          <div
+            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}
+          >
+            {/* Stabilizer */}
+            <div
+              style={{
+                ...PANEL,
+                border: `1px solid ${commanderOn ? "#00ff88" : "#1e2e4a"}`,
+              }}
+            >
+              <div style={PANEL_TITLE}>
+                ⚖ STABILIZER — 1,600,000,000 TITANIUM
+              </div>
+              <div
+                style={{ display: "flex", flexDirection: "column", gap: 12 }}
+              >
+                {["STAGE 1 — 800M GENTLE", "STAGE 2 — 800M TITANIUM"].map(
+                  (stage) => (
+                    <div
+                      key={stage}
+                      style={{ display: "flex", alignItems: "center", gap: 10 }}
+                    >
+                      <div
+                        style={{
+                          width: 10,
+                          height: 10,
+                          borderRadius: "50%",
+                          background: commanderOn ? "#00ff88" : "#2a5040",
+                          boxShadow: commanderOn ? "0 0 8px #00ff88" : "none",
+                        }}
+                      />
+                      <div
+                        style={{
+                          color: "#8aa0c0",
+                          fontSize: 11,
+                          letterSpacing: 1,
+                        }}
+                      >
+                        {stage}
+                      </div>
+                      <div
+                        style={{
+                          color: greenText(commanderOn),
+                          fontSize: 11,
+                          fontWeight: 700,
+                          letterSpacing: 1,
+                        }}
+                      >
+                        {commanderOn ? "ONLINE" : "STANDBY"}
+                      </div>
+                    </div>
+                  ),
+                )}
+                <div style={{ marginTop: 4 }}>
+                  {[
+                    "NO CLIPPING",
+                    "NO LIMITING",
+                    "FULL POWER",
+                    "SMART CHIP",
+                  ].map((lbl) => (
+                    <div
+                      key={lbl}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        marginBottom: 4,
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: 6,
+                          height: 6,
+                          borderRadius: "50%",
+                          background: green(commanderOn),
+                        }}
+                      />
+                      <div
+                        style={{
+                          color: "#4a6080",
+                          fontSize: 10,
+                          letterSpacing: 1,
+                        }}
+                      >
+                        {lbl}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Auto Freq Generator */}
+            <div style={PANEL}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  marginBottom: 14,
+                }}
+              >
+                <div style={PANEL_TITLE}>🎵 AUTO FREQ GENERATOR</div>
+                <button
+                  type="button"
+                  data-ocid="autogen.toggle"
+                  onClick={() => setAutoGenOn((v) => !v)}
+                  style={autoGenOn ? BTN_GREEN : BTN_MUTED}
+                >
+                  {autoGenOn ? "ON" : "OFF"}
+                </button>
+              </div>
+              {/* Frequency bars */}
+              <div
+                style={{
+                  display: "flex",
+                  gap: 3,
+                  alignItems: "flex-end",
+                  height: 64,
+                  marginBottom: 10,
+                }}
+              >
+                {FREQ_BAR_KEYS.map((fbKey, i) => (
+                  <motion.div
+                    key={fbKey}
+                    animate={{
+                      height: `${Math.max(4, (freqBars[i] ?? 0) * 100)}%`,
+                    }}
+                    transition={{ duration: 0.08 }}
+                    style={{
+                      flex: 1,
+                      background: `hsl(${180 + i * 9}, 80%, 55%)`,
+                      borderRadius: 2,
+                      minHeight: 4,
+                    }}
+                  />
+                ))}
+              </div>
+              <div style={{ color: "#4a6080", fontSize: 10, letterSpacing: 1 }}>
+                Analyzes song every 500ms • Auto-adjusts EQ bands in real time
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* ── Footer ── */}
+        <footer
           style={{
             textAlign: "center",
-            padding: "16px",
-            borderTop: "1px solid #1e3a5f",
-            fontSize: 10,
-            color: "#2a4a6f",
+            paddingTop: 28,
+            borderTop: "1px solid #1e2e4a",
+            color: "#4a6080",
+            fontSize: 12,
           }}
         >
-          © {new Date().getFullYear()}. Built with ❤️ using{" "}
+          © {new Date().getFullYear()}. Built with ❤ using{" "}
           <a
             href={`https://caffeine.ai?utm_source=caffeine-footer&utm_medium=referral&utm_content=${encodeURIComponent(window.location.hostname)}`}
-            style={{ color: "#4a6fa5", textDecoration: "none" }}
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: "#f5c542", textDecoration: "none" }}
           >
             caffeine.ai
           </a>
-        </div>
+        </footer>
       </div>
     </div>
   );

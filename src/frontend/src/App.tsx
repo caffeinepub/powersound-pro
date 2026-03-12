@@ -371,7 +371,8 @@ export default function App() {
   const [showBook, setShowBook] = useState(true);
   const [file, setFile] = useState<File | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [battery, setBattery] = useState(100);
+  const [hasFile, setHasFile] = useState(false);
+  const [battery, setBattery] = useState(0);
   const [commanderOn, setCommanderOn] = useState(true);
   const [bass80Freq, setBass80Freq] = useState(80);
   const [routeMode, setRouteMode] = useState<"both" | "bass" | "highs">("both");
@@ -388,6 +389,7 @@ export default function App() {
   const chainRef = useRef<AudioChain | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animRef = useRef<number>(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Battery drain — powers the amp only
   useEffect(() => {
@@ -433,17 +435,34 @@ export default function App() {
     const url = URL.createObjectURL(f);
     const el = audioRef.current!;
     el.src = url;
+    // Tear down old chain so fresh one is built on next play press
+    if (chainRef.current) {
+      try {
+        chainRef.current.source.disconnect();
+      } catch {}
+      try {
+        chainRef.current.ctx.close();
+      } catch {}
+      chainRef.current = null;
+    }
+    if (analyserRef.current) {
+      analyserRef.current = null;
+    }
+    setHasFile(true);
     setIsPlaying(false);
     logMem(`File loaded: ${f.name}`);
   }
 
   async function togglePlay() {
     if (battery <= 0) {
-      logMem("AMP OFF — Charge battery");
+      logMem("CHARGE BATTERY FIRST — Press CHARGE button");
       return;
     }
     const el = audioRef.current!;
-    if (!el.src) return;
+    if (!hasFile) {
+      logMem("LOAD A MUSIC FILE FIRST — Use the file picker above");
+      return;
+    }
 
     let ctx: AudioContext;
     if (!chainRef.current) {
@@ -590,6 +609,12 @@ export default function App() {
         </div>
       </div>
 
+      <style>{`
+        @keyframes chargePulse {
+          0%, 100% { box-shadow: 0 0 10px #ffcc0066; transform: scale(1); }
+          50% { box-shadow: 0 0 24px #ffcc00cc; transform: scale(1.06); }
+        }
+      `}</style>
       <div style={{ maxWidth: 420, margin: "0 auto", padding: "10px 12px" }}>
         {/* Commander Master Control */}
         <div
@@ -689,37 +714,77 @@ export default function App() {
                 logMem("Battery recharged to 100%");
               }}
               style={{
-                background: "#001f5c",
-                border: `1px solid ${BLUE}`,
-                color: BLUE,
-                borderRadius: 4,
-                padding: "4px 10px",
+                background: battery <= 0 ? "#1a3300" : "#001f5c",
+                border: `2px solid ${battery <= 0 ? "#ffcc00" : BLUE}`,
+                color: battery <= 0 ? "#ffcc00" : BLUE,
+                borderRadius: 6,
+                padding: battery <= 0 ? "8px 18px" : "4px 10px",
                 cursor: "pointer",
-                fontSize: 10,
+                fontSize: battery <= 0 ? 12 : 10,
+                fontWeight: battery <= 0 ? 900 : 400,
+                letterSpacing: battery <= 0 ? 2 : 0,
+                animation:
+                  battery <= 0
+                    ? "chargePulse 1.2s ease-in-out infinite"
+                    : "none",
+                boxShadow: battery <= 0 ? "0 0 16px #ffcc0088" : "none",
+                transition: "all 0.3s",
               }}
             >
-              CHARGE
+              ⚡ CHARGE
             </button>
           </div>
-          <div style={{ color: "#5588aa", fontSize: 9, marginTop: 4 }}>
-            Amp power only — not connected to audio signal
+          <div
+            style={{
+              color: isPlaying
+                ? "#00ff88"
+                : battery <= 0
+                  ? "#ffcc00"
+                  : "#5588aa",
+              fontSize: 9,
+              fontWeight: battery <= 0 ? 700 : 400,
+              marginTop: 4,
+              letterSpacing: battery <= 0 ? 1 : 0,
+            }}
+          >
+            {isPlaying
+              ? "POWERING AMP + AUDIO SYSTEM — ACTIVE"
+              : battery <= 0
+                ? "⚡ CHARGE BATTERY TO START"
+                : "AMP POWERED — READY"}
           </div>
         </Panel>
 
         {/* File Loader + Transport */}
         <Panel title="MUSIC SOURCE">
           <input
-            data-ocid="music.upload_button"
+            ref={fileInputRef}
             type="file"
             accept="audio/*"
             onChange={handleFile}
-            style={{
-              color: "#aaa",
-              fontSize: 11,
-              marginBottom: 8,
-              width: "100%",
-            }}
+            style={{ display: "none" }}
           />
+          <button
+            type="button"
+            data-ocid="music.upload_button"
+            onClick={() => fileInputRef.current?.click()}
+            style={{
+              background: "#001428",
+              border: "1px solid #00aaff",
+              color: "#00aaff",
+              borderRadius: 6,
+              padding: "8px 14px",
+              cursor: "pointer",
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: 2,
+              width: "100%",
+              marginBottom: 8,
+              textAlign: "center",
+            }}
+          >
+            📂 LOAD MUSIC FILE
+          </button>
           <audio ref={audioRef} style={{ display: "none" }}>
             <track kind="captions" />
           </audio>
